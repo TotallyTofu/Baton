@@ -1,0 +1,769 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Baton</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23161b22'/%3E%3Crect x='7' y='9' width='7' height='16' rx='2' fill='%232dd4bf'/%3E%3Crect x='18' y='14' width='7' height='11' rx='2' fill='%23a78bfa'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#0d1015;--panel:#151a21;--panel2:#1b212a;--line:#272e39;--text:#e6ebf1;--muted:#8a94a3;--faint:#566070;
+  --accent:#2dd4bf;--ok:#3fb950;--warn:#e3a535;--err:#f26b5b;
+  --c-tabby:#2dd4bf;--c-unsloth:#a3e635;--c-comfyui:#a78bfa;--c-game:#fb923c;--c-stream:#f472b6;--c-system:#5f6b7c;--c-other:#94a3b8;
+  --m-normal:#3fb950;--m-stream:#f472b6;--m-game:#fb923c;--m-hold:#fb923c;
+  --shadow:0 1px 0 rgba(255,255,255,.03) inset;
+}
+@media (prefers-color-scheme:light){:root{
+  --bg:#f5f6f8;--panel:#ffffff;--panel2:#f1f3f6;--line:#dfe3e9;--text:#1b2230;--muted:#5d6878;--faint:#9aa3b1;
+  --accent:#0f9f8f;--ok:#1f883d;--warn:#9a6700;--err:#cf222e;
+  --c-tabby:#0fa898;--c-unsloth:#65a30d;--c-comfyui:#7c5cf0;--c-game:#ea7a1a;--c-stream:#db2777;--c-system:#8b97a8;--c-other:#a7b1bf;
+  --shadow:0 1px 2px rgba(20,30,50,.06);
+}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI Variable Text","Segoe UI",sans-serif}
+body{padding:0 16px 40px}
+.wrap{max-width:1240px;margin:0 auto}
+header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:18px 0 14px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:17px;letter-spacing:.2px}
+.brand svg{display:block}
+.mode{display:flex;align-items:center;gap:10px;flex:1;min-width:240px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:650;letter-spacing:.5px;text-transform:uppercase;border:1px solid var(--line);background:var(--panel2);white-space:nowrap}
+.pill .d{width:7px;height:7px;border-radius:50%;background:currentColor}
+.why{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+button{font:inherit;font-size:13px;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--faint)}
+button.primary{background:var(--accent);border-color:transparent;color:#04201c;font-weight:600}
+button.warn{color:var(--c-game);border-color:color-mix(in srgb,var(--c-game) 45%,var(--line))}
+button:disabled{opacity:.45;cursor:default}
+.conn{font-size:12px;color:var(--muted)}
+.conn.off{color:var(--err)}
+.op{display:none;align-items:center;gap:10px;padding:10px 14px;margin-bottom:14px;border-radius:10px;background:color-mix(in srgb,var(--accent) 10%,var(--panel));border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line))}
+.op.on{display:flex}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid color-mix(in srgb,var(--accent) 30%,transparent);border-top-color:var(--accent);animation:sp 0.9s linear infinite;flex:none}
+@keyframes sp{to{transform:rotate(360deg)}}
+.op .stage{color:var(--muted)}
+h2{font-size:12px;font-weight:650;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin:22px 0 10px}
+.grid{display:grid;gap:12px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow);min-width:0}
+.gpu-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.idx{font-size:12px;color:var(--muted);font-weight:600}
+.gname{font-weight:620}
+.chip{font-size:11px;padding:1px 7px;border-radius:999px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.chip.enc{color:var(--c-stream);border-color:color-mix(in srgb,var(--c-stream) 40%,var(--line))}
+.vram{margin:10px 0 6px;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.vram b{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums}
+.vram .tot{color:var(--muted);font-variant-numeric:tabular-nums}
+.bar{display:flex;height:12px;border-radius:6px;overflow:hidden;background:var(--panel2);border:1px solid var(--line)}
+.bar span{height:100%;min-width:2px}
+.bar span+span{box-shadow:-1px 0 0 var(--panel)}
+.bar .unattr{background:repeating-linear-gradient(135deg,var(--faint) 0 3px,transparent 3px 6px);opacity:.55}
+.stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
+.stats b{color:var(--text);font-weight:600}
+.holders{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:4px}
+.holders li{display:grid;grid-template-columns:10px 1fr auto auto;gap:8px;align-items:center;font-size:13px}
+.holders li.empty{display:block}
+.holders .sw{width:8px;height:8px;border-radius:2px}
+.holders .hn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.holders .hm{font-variant-numeric:tabular-nums;color:var(--muted)}
+.holders .tag{font-size:11px;color:var(--muted)}
+.eng-head{display:flex;align-items:center;gap:8px}
+.eng-head .dot{width:10px;height:10px;border-radius:3px;flex:none}
+.eng-head b{font-size:15px}
+.eng-head .kind{color:var(--muted);font-size:12px}
+.eng-head .pill{margin-left:auto}
+.card.holder{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
+.model{margin-top:8px;font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub{color:var(--muted);font-size:13px;margin-top:4px;font-variant-numeric:tabular-nums}
+.errtxt{color:var(--err);font-size:12.5px;margin-top:6px;white-space:pre-wrap;word-break:break-word;max-height:7.5em;overflow:auto}
+.card .actions{margin-top:12px}
+.st-hold{color:var(--accent)}.st-load{color:var(--warn)}.st-err{color:var(--err)}.st-up{color:var(--ok)}.st-off{color:var(--faint)}
+.hit{display:flex;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
+.hit:first-child{border-top:0}
+.empty{color:var(--faint);font-size:13px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13px}
+.kv span:nth-child(odd){color:var(--muted)}
+code{font:12.5px ui-monospace,"Cascadia Code",Consolas,monospace;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+.events{max-height:420px;overflow:auto}
+.ev{display:grid;grid-template-columns:72px 8px 74px 1fr;gap:10px;align-items:baseline;padding:5px 0;border-top:1px solid var(--line);font-size:13px}
+.ev:first-child{border-top:0}
+.ev .t{color:var(--faint);font-variant-numeric:tabular-nums}
+.ev .lv{width:7px;height:7px;border-radius:50%;background:var(--faint);align-self:center}
+.ev .lv.warn{background:var(--warn)}.ev .lv.error{background:var(--err)}
+.ev .k{color:var(--muted);font-size:12px}
+.ev .m{word-break:break-word}
+.banner{padding:10px 14px;border-radius:10px;border:1px solid color-mix(in srgb,var(--err) 40%,var(--line));color:var(--err);margin-bottom:12px;display:none}
+.banner.on{display:block}
+@media (max-width:560px){.ev{grid-template-columns:60px 8px 1fr}.ev .k{display:none}.why{white-space:normal}}
+
+/* --- games drawer --- */
+button svg{vertical-align:-3px}
+.btn-icon{display:inline-flex;align-items:center;gap:7px}
+.linkbtn{background:none;border:0;padding:0;color:var(--accent);font-weight:550;cursor:pointer}
+.linkbtn:hover{text-decoration:underline}
+.scrim{position:fixed;inset:0;background:rgba(5,8,12,.45);backdrop-filter:blur(2px);opacity:0;transition:opacity .2s ease;z-index:20}
+.scrim.on{opacity:1}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(480px,100vw);background:var(--panel);border-left:1px solid var(--line);box-shadow:-24px 0 60px rgba(0,0,0,.35);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .24s cubic-bezier(.2,.8,.2,1);z-index:21}
+.drawer.on{transform:none}
+.drawer[hidden],.scrim[hidden]{display:none}
+@media (prefers-reduced-motion:reduce){.drawer,.scrim{transition:none}}
+.dr-head{display:flex;align-items:flex-start;gap:12px;padding:20px 22px 14px;border-bottom:1px solid var(--line)}
+.dr-head h3{margin:0;font-size:18px;font-weight:650;display:flex;align-items:center;gap:9px}
+.dr-sub{margin:4px 0 0;color:var(--muted);font-size:13px}
+.icon-btn{margin-left:auto;width:32px;height:32px;padding:0;display:grid;place-items:center;border-radius:8px;background:transparent;border:1px solid transparent;color:var(--muted)}
+.icon-btn:hover{background:var(--panel2);border-color:var(--line);color:var(--text)}
+.dr-body{flex:1;overflow:auto;padding:6px 22px 24px}
+.dr-foot{padding:12px 22px;border-top:1px solid var(--line);color:var(--faint);font-size:12px}
+.sec{padding:16px 0 4px}
+.sec+.sec{border-top:1px solid var(--line)}
+.sec-h{display:flex;align-items:center;gap:10px}
+.sec-h h4{margin:0;font-size:12px;font-weight:650;color:var(--muted);text-transform:uppercase;letter-spacing:.8px}
+.sec-h .count{font-size:11px;color:var(--faint)}
+.sec-d{margin:3px 0 10px;color:var(--faint);font-size:12.5px}
+.rows{display:grid;gap:2px}
+.row{display:grid;grid-template-columns:30px 1fr auto;align-items:center;gap:10px;padding:7px 8px;margin:0 -8px;border-radius:9px}
+.row:hover{background:var(--panel2)}
+.row .ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:var(--panel2);border:1px solid var(--line);color:var(--muted)}
+.row:hover .ic{background:var(--panel)}
+.row .tx{min-width:0}
+.row .nm{font-weight:560;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:8px}
+.row .pt{color:var(--faint);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+.row .pt bdi{direction:ltr;unicode-bidi:isolate}
+.row .act{display:flex;gap:6px;align-items:center}
+.row .rm{opacity:0;transition:opacity .12s}
+.row:hover .rm,.row:focus-within .rm{opacity:1}
+@media (hover:none){.row .rm{opacity:1}}
+.live{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:var(--ok);text-transform:uppercase;letter-spacing:.4px}
+.live i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 60%,transparent);animation:pulse 1.8s infinite}
+@keyframes pulse{70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.empty-row{color:var(--faint);font-size:13px;padding:8px 0}
+.adders{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.ghost{background:transparent;border:1px dashed var(--line);color:var(--muted)}
+.ghost:hover{border-color:var(--accent);color:var(--accent)}
+.ghost:disabled{border-style:dashed}
+.paste{display:flex;gap:8px;margin-top:10px}
+.paste input{flex:1;min-width:0;font:inherit;font-size:13px;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+.paste input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+.paste input::placeholder{color:var(--faint)}
+.sugg{background:color-mix(in srgb,var(--c-game) 7%,var(--panel));border:1px solid color-mix(in srgb,var(--c-game) 30%,var(--line));border-radius:12px;padding:10px 12px;margin-top:6px}
+.sugg .row:hover{background:color-mix(in srgb,var(--c-game) 10%,var(--panel))}
+.sugg .ic{color:var(--c-game)}
+.mini{font-size:12px;padding:4px 10px;border-radius:7px}
+.mini.primary{background:var(--c-game);color:#1d1003}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.chips.off{opacity:.45}
+.switch{position:relative;width:38px;height:22px;border-radius:999px;background:var(--line);border:0;padding:0;margin-left:auto;transition:background .15s;flex:none}
+.switch::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .15s}
+.switch[aria-checked="true"]{background:var(--accent)}
+.switch[aria-checked="true"]::after{transform:translateX(16px)}
+.toast{position:fixed;left:50%;bottom:22px;transform:translate(-50%,20px);opacity:0;pointer-events:none;background:var(--text);color:var(--bg);border-radius:10px;padding:9px 14px;font-size:13px;display:flex;gap:14px;align-items:center;transition:opacity .18s,transform .18s;z-index:30;max-width:calc(100vw - 32px);box-shadow:0 10px 30px rgba(0,0,0,.3)}
+.toast.on{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+.toast.err{background:var(--err);color:#fff}
+.toast button{background:none;border:0;color:inherit;font-weight:650;padding:0;text-decoration:underline;cursor:pointer}
+.icon-btn:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (max-width:480px){.sugg .row{grid-template-columns:30px 1fr}.sugg .row .act{grid-column:2;flex-wrap:wrap}}
+/* --- system memory --- */
+.memgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px 32px;align-items:start}
+@media (max-width:820px){.memgrid{grid-template-columns:minmax(0,1fr)}}
+.memgrid .holders{margin-top:0}
+.vram b.hot{color:var(--warn)}
+.vram b.crit{color:var(--err)}
+.holders .cnt{color:var(--faint);font-weight:400;margin-left:4px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:8px;height:8px;border-radius:2px;display:inline-block}
+
+/* --- engine log panel --- */
+.drawer.wide{width:min(900px,100vw)}
+.dr-tools{margin-left:auto;display:flex;gap:8px;align-items:center}
+.dr-tools .icon-btn{margin-left:0}
+.mstats{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.mstats b{color:var(--text);font-weight:620}
+.strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--line);border-bottom:1px solid var(--line)}
+.strip:empty{display:none}
+.tile{background:var(--panel);padding:12px 18px}
+.tile .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px}
+.tile .v{font-size:20px;font-weight:650;font-variant-numeric:tabular-nums;margin-top:2px}
+.tile .v small{font-size:12px;font-weight:500;color:var(--muted);margin-left:3px}
+.tile .s{font-size:12px;color:var(--faint);margin-top:1px;font-variant-numeric:tabular-nums}
+.strip-cap{grid-column:1/-1;background:var(--panel);padding:0 18px 10px;font-size:12px;color:var(--faint)}
+@media (max-width:560px){.strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.logwrap{position:relative;flex:1;min-height:0}
+.log{margin:0;height:100%;overflow:auto;padding:12px 0 24px;font:12.5px/1.55 ui-monospace,"Cascadia Code","Cascadia Mono",Consolas,monospace;color:var(--text);background:var(--bg)}
+.log .ln{display:block;padding:0 18px;white-space:pre-wrap;word-break:break-word}
+.log .ts{color:var(--faint)}
+.log .lvl{color:var(--muted)}
+.log .warn{color:var(--warn)}
+.log .err{color:var(--err)}
+.log .metric{background:color-mix(in srgb,var(--accent) 9%,transparent);color:color-mix(in srgb,var(--accent) 70%,var(--text))}
+.log .sep{color:var(--faint);border-top:1px dashed var(--line);margin-top:10px;padding-top:8px}
+.log .none{color:var(--faint);white-space:normal;font-family:inherit;padding:24px 18px;line-height:1.6}
+.jump{position:absolute;right:22px;bottom:18px;border-radius:999px;background:var(--accent);color:#04201c;border:0;font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,.3)}
+.waiting{display:none;align-items:center;gap:8px;color:var(--muted);font-size:12.5px;margin-top:10px}
+.waiting.on{display:flex}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="brand">
+    <svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="var(--panel2)" stroke="var(--line)"/><rect x="7" y="9" width="7" height="16" rx="2" fill="var(--c-tabby)"/><rect x="18" y="14" width="7" height="11" rx="2" fill="var(--c-comfyui)"/></svg>
+    Baton
+  </div>
+  <div class="mode"><span id="modePill" class="pill"><span class="d"></span><span id="modeName">…</span></span><span id="modeWhy" class="why"></span></div>
+  <div class="actions" id="topActions"></div>
+  <span id="conn" class="conn">connecting…</span>
+</header>
+<div id="banner" class="banner"></div>
+<div id="op" class="op"><div class="spin"></div><div><b id="opName"></b> <span id="opStage" class="stage"></span></div></div>
+
+<h2>GPUs</h2>
+<section id="gpus" class="grid g2"></section>
+
+<h2>Memory</h2>
+<section id="mem"></section>
+
+<h2>Engines</h2>
+<section id="engines" class="grid g3"></section>
+
+<section class="grid g2">
+  <div>
+    <h2>Games &amp; streams</h2>
+    <div class="card" id="hits"></div>
+  </div>
+  <div>
+    <h2>Gateway &amp; policy</h2>
+    <div class="card" id="gw"></div>
+  </div>
+</section>
+
+<h2>Events</h2>
+<div class="card events" id="events"></div>
+</div>
+
+<div id="scrim" class="scrim" hidden></div>
+<aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drTitle" hidden>
+  <div class="dr-head">
+    <div>
+      <h3 id="drTitle"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--c-game)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01"/><path d="M17.3 5H6.7a4 4 0 0 0-3.96 3.43l-.73 5.1A3 3 0 0 0 7.2 16.1L9 14h6l1.8 2.1a3 3 0 0 0 5.2-2.57l-.74-5.1A4 4 0 0 0 17.3 5z"/></svg>Games</h3>
+      <p class="dr-sub">While any of these run, Baton frees both GPUs and brings your model back after.</p>
+    </div>
+    <button class="icon-btn" id="drClose" aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <div class="dr-body" id="drBody"><div class="empty-row">Loading…</div></div>
+  <div class="dr-foot" id="drFoot">Changes apply right away.</div>
+</aside>
+<aside id="logDrawer" class="drawer wide" role="dialog" aria-modal="true" aria-labelledby="logTitle" hidden>
+  <div class="dr-head">
+    <div>
+      <h3 id="logTitle">Log</h3>
+      <p class="dr-sub" id="logSub"></p>
+    </div>
+    <div class="dr-tools">
+      <button id="logNotepad" type="button">Open in Notepad</button>
+      <button class="icon-btn" id="logClose" aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+  </div>
+  <div class="strip" id="logStats"></div>
+  <div class="logwrap"><pre class="log" id="logPre" tabindex="0" aria-label="Engine output"></pre><button class="jump" id="logJump" type="button" hidden>↓ Latest</button></div>
+</aside>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const gib = mib => (mib / 1024).toFixed(mib >= 10240 ? 1 : 2);
+const ago = t => { const s = Math.max(0, (Date.now() - new Date(t)) / 1000); if (s < 60) return Math.round(s) + 's'; if (s < 3600) return Math.round(s/60) + 'm'; return (s/3600).toFixed(1) + 'h'; };
+const KIND_COLOR = {tabby:'var(--c-tabby)', unsloth:'var(--c-unsloth)', comfyui:'var(--c-comfyui)'};
+const MODES = {normal:['Normal','var(--m-normal)'], stream:['Streaming','var(--m-stream)'], game:['Game','var(--m-game)'], hold:['Hold','var(--m-hold)']};
+let evSeq = 0, evList = [], kinds = {}, models = [], lastModels = 0, view = null;
+
+function tagColor(tag) {
+  if (!tag) return 'var(--c-other)';
+  if (kinds[tag]) return KIND_COLOR[kinds[tag]] || 'var(--accent)';
+  return {game:'var(--c-game)', stream:'var(--c-stream)', system:'var(--c-system)'}[tag] || 'var(--c-other)';
+}
+
+async function post(path, body) {
+  try {
+    const r = await fetch(path, {method:'POST', headers:{'X-Baton':'dashboard','Content-Type':'application/json'}, body: JSON.stringify(body || {})});
+    if (!r.ok) { const j = await r.json().catch(() => ({})); alert(j.error || r.statusText); }
+  } catch (e) { alert(e); }
+  setTimeout(poll, 150);
+}
+
+function renderHeader(v) {
+  const [name, color] = MODES[v.mode] || [v.mode, 'var(--muted)'];
+  $('#modePill').style.color = color;
+  $('#modeName').textContent = name;
+  let why = v.mode_why ? v.mode_why : (v.holder ? v.holder + ' holds the GPUs' : 'no engine holds the GPUs');
+  if (v.mode !== 'normal') why += ' · ' + ago(v.mode_since);
+  if (v.restore_to) why += ' · restores ' + v.restore_to + ' after';
+  $('#modeWhy').textContent = why;
+  const holdBtn = v.mode === 'hold'
+    ? `<button class="warn" onclick="post('/api/unhold')">Release hold</button>`
+    : `<button onclick="hold()">Hold GPUs</button>`;
+  $('#topActions').innerHTML = `<button class="btn-icon" onclick="openGames()">${ICON.pad}Games</button>` + holdBtn + `<button onclick="if(confirm('Release every engine from both GPUs?'))post('/api/free')">Free all GPUs</button>`;
+  const op = $('#op');
+  if (v.op) {
+    op.classList.add('on');
+    $('#opName').textContent = v.op.name;
+    $('#opStage').textContent = (v.op.stage ? '· ' + v.op.stage : '') + ' · ' + ago(v.op.since) + (v.queue && v.queue.length ? ` · ${v.queue.length} queued` : '');
+  } else op.classList.remove('on');
+  const b = $('#banner');
+  if (v.error) { b.textContent = v.error; b.classList.add('on'); } else b.classList.remove('on');
+}
+
+function hold() {
+  const r = prompt('Reserve both GPUs. Reason?', 'gaming');
+  if (r === null) return;
+  post('/api/hold', {reason: r});
+}
+
+function renderGPUs(v) {
+  $('#gpus').innerHTML = (v.gpus || []).map(g => {
+    const total = g.mem_total / 1048576, used = g.mem_used / 1048576, free = g.mem_free / 1048576;
+    const groups = {};
+    let attributed = 0;
+    for (const h of g.holders || []) {
+      const key = h.tag || 'other';
+      groups[key] = (groups[key] || 0) + h.mib;
+      attributed += h.mib;
+    }
+    const order = Object.keys(groups).sort((a, b) => groups[b] - groups[a]);
+    let segs = order.map(k => `<span title="${esc(k)}: ${gib(groups[k])} GiB" style="width:${groups[k] / total * 100}%;background:${tagColor(k === 'other' ? '' : k)}"></span>`).join('');
+    const un = Math.max(0, used - attributed);
+    if (un > 64) segs += `<span class="unattr" title="driver / unattributed: ${gib(un)} GiB" style="width:${un / total * 100}%"></span>`;
+    const enc = (g.encoders || []).length ? `<span class="chip enc">NVENC ×${g.encoders.length}</span>` : '';
+    const holders = (g.holders || []).slice(0, 6).map(h => `<li><span class="sw" style="background:${tagColor(h.tag)}"></span><span class="hn" title="${esc(h.path || h.name)} (pid ${h.pid})">${esc(h.name)}</span><span class="tag">${esc(h.tag || '')}${h.util >= 1 ? ' · ' + Math.round(h.util) + '%' : ''}</span><span class="hm">${gib(h.mib)} GiB</span></li>`).join('');
+    return `<div class="card">
+      <div class="gpu-head"><span class="idx">GPU ${g.index}</span><span class="gname">${esc(g.name.replace('NVIDIA GeForce ', ''))}</span>${enc}${g.probe_error ? `<span class="chip">${esc(g.probe_error)}</span>` : ''}</div>
+      <div class="vram"><b>${gib(used)}</b><span class="tot">/ ${gib(total)} GiB · ${gib(free)} GiB free</span></div>
+      <div class="bar">${segs}</div>
+      <div class="stats"><span>load <b>${g.util}%</b></span><span><b>${g.temp_c}</b>°C</span><span><b>${Math.round(g.power_w)}</b>/${Math.round(g.power_max_w)} W</span><span>fan <b>${g.fan_pct}%</b></span><span><b>${g.clock_mhz}</b> MHz</span></div>
+      <ul class="holders">${holders || '<li class="empty">nothing on this card</li>'}</ul>
+    </div>`;
+  }).join('') || '<div class="card empty">No NVIDIA GPU found.</div>';
+}
+
+function renderMem(v) {
+  const m = v.memory;
+  if (!m || !m.total) { $('#mem').innerHTML = ''; return; }
+  const M = 1048576, total = m.total / M, used = m.used / M;
+  const hs = m.holders || [];
+  const segs = [];
+  let shown = 0;
+  // Engines and games get their own colors; other apps and Windows share one each.
+  for (const h of hs) {
+    if (h.tag && h.tag !== 'system') { segs.push([h.tag, h.mib, tagColor(h.tag)]); shown += h.mib; }
+  }
+  const apps = hs.filter(h => !h.tag).reduce((a, h) => a + h.mib, 0);
+  const sys = hs.filter(h => h.tag === 'system').reduce((a, h) => a + h.mib, 0);
+  if (apps) { segs.push(['apps', apps, 'var(--c-other)']); shown += apps; }
+  if (sys) { segs.push(['Windows', sys, 'var(--c-system)']); shown += sys; }
+  const rest = Math.max(0, used - shown);
+  let bar = segs.map(([k, mib, c]) => `<span title="${esc(k)}: ${gib(mib)} GiB" style="width:${mib / total * 100}%;background:${c}"></span>`).join('');
+  if (rest > 64) bar += `<span class="unattr" title="services, drivers and kernel: ${gib(rest)} GiB" style="width:${rest / total * 100}%"></span>`;
+  const load = m.load, hot = load >= 95 ? 'crit' : load >= 85 ? 'hot' : '';
+  const legend = segs.filter(([k]) => kinds[k]).map(([k, , c]) => `<span><i style="background:${c}"></i>${esc(k)}</span>`).join('')
+    + (apps ? '<span><i style="background:var(--c-other)"></i>apps</span>' : '')
+    + `<span><i style="background:var(--c-system)"></i>Windows &amp; services</span>`;
+  const rows = hs.slice(0, 8).map(h => `<li><span class="sw" style="background:${tagColor(h.tag)}"></span><span class="hn">${esc(h.name)}${h.count > 1 ? `<span class="cnt">×${h.count}</span>` : ''}</span><span class="tag">${esc(h.tag || '')}</span><span class="hm">${gib(h.mib)} GiB</span></li>`).join('');
+  $('#mem').innerHTML = `<div class="card"><div class="memgrid">
+    <div>
+      <div class="gpu-head"><span class="idx">RAM</span><span class="gname">System memory</span></div>
+      <div class="vram"><b class="${hot}">${gib(used)}</b><span class="tot">/ ${gib(total)} GiB · ${gib(m.available / M)} GiB free</span></div>
+      <div class="bar">${bar}</div>
+      <div class="legend">${legend}</div>
+      <div class="stats"><span>in use <b>${load}%</b></span><span>cached <b>${gib(m.cached / M)}</b> GiB</span><span>commit <b>${gib(m.commit_total / M)}</b>/${gib(m.commit_limit / M)} GiB</span><span>kernel <b>${gib(m.kernel / M)}</b> GiB</span></div>
+    </div>
+    <ul class="holders">${rows}</ul>
+  </div></div>`;
+}
+
+function engState(e) {
+  if (e.error && !e.up && !e.loading) return ['Error', 'st-err'];
+  if (e.loading) return ['Loading', 'st-load'];
+  if (e.holder && (e.loaded || e.up)) return ['Holds GPUs', 'st-hold'];
+  if (e.loaded) return ['Loaded', 'st-up'];
+  if (e.up) return [e.llm ? 'Up, no model' : 'Running', 'st-up'];
+  return ['Stopped', 'st-off'];
+}
+
+function renderEngines(v) {
+  kinds = {};
+  for (const e of v.engines || []) kinds[e.name] = e.kind;
+  const busyOp = !!v.op;
+  $('#engines').innerHTML = (v.engines || []).map(e => {
+    const [st, cls] = engState(e);
+    const vram = (Object.entries(e.vram_mib || {}).filter(([, m]) => m > 0).map(([g, m]) => `GPU${g} ${gib(m)} GiB`).join(' · ') || 'no VRAM')
+      + (e.ram_mib >= 64 ? ` · RAM ${gib(e.ram_mib)} GiB` : '');
+    const bits = [];
+    if (e.busy) bits.push('busy: ' + esc(e.busy_why || 'working'));
+    if (e.inflight) bits.push(e.inflight + ' gateway request(s)');
+    if (e.util >= 1) bits.push('load ' + Math.round(e.util) + '%');
+    if (e.kind === 'comfyui' && (v.gate.waiting || v.gate.running)) bits.push(`gate: ${v.gate.running} running, ${v.gate.waiting} waiting`);
+    if (e.restore) bits.push('comes back after the ' + (v.mode === 'normal' ? 'current job' : v.mode));
+    const activeLabel = e.kind === 'comfyui' ? 'Give GPUs' : 'Use';
+    return `<div class="card ${e.holder ? 'holder' : ''}">
+      <div class="eng-head"><span class="dot" style="background:${KIND_COLOR[e.kind] || 'var(--accent)'}"></span><b>${esc(e.name)}</b><span class="kind">${esc(e.kind)} · GPU ${esc((e.gpus || []).join(','))}</span><span class="pill ${cls}"><span class="d"></span>${st}</span></div>
+      <div class="model" title="${esc(e.model)}">${esc(e.model || '—')}</div>
+      <div class="sub">${vram}${e.detail ? ' · ' + esc(e.detail) : ''}</div>
+      ${bits.length ? `<div class="sub">${bits.join(' · ')}</div>` : ''}
+      ${lastReq(e)}
+      ${e.error ? `<div class="errtxt">${esc(e.error)}</div>` : ''}
+      <div class="actions">
+        <button class="primary" ${busyOp || (e.holder && e.loaded) ? 'disabled' : ''} onclick="post('/api/engines/${encodeURIComponent(e.name)}/activate')">${activeLabel}</button>
+        <button ${!(e.loaded || e.loading || (e.pids || []).length) ? 'disabled' : ''} onclick="post('/api/engines/${encodeURIComponent(e.name)}/release')">Release</button>
+        ${e.has_log || e.kind === 'tabby' ? `<button data-n="${esc(e.name)}" onclick="openLog(this.dataset.n)">Log</button>` : ''}
+      </div>
+    </div>`;
+  }).join('') || '<div class="card empty">No engines configured.</div>';
+}
+
+// The last request TabbyAPI reported, under its card.
+function lastReq(e) {
+  const m = e.extra && e.extra.last;
+  if (!m) return '';
+  return `<div class="mstats" title="Last request: ${esc(m.request)} at ${esc(m.at)}"><span><b>${m.decode_tps}</b> T/s decode</span>`
+    + (m.prompt_tps ? `<span><b>${Math.round(m.prompt_tps)}</b> T/s prompt</span>` : '')
+    + (m.draft_total ? `<span><b>${m.draft_pct}%</b> draft</span>` : '')
+    + `<span>${esc(m.at)}</span></div>`;
+}
+
+// --- engine log panel ---
+let logName = null, logNext = -1, logTimer = null, logPrevCls = '', logLines = 0;
+
+function logLine(l) {
+  let cls = '';
+  if (/^\s{10,}\S/.test(l) && (logPrevCls === 'metric' || logPrevCls === 'err' || logPrevCls === 'warn')) cls = logPrevCls;
+  else if (/^=====/.test(l)) cls = 'sep';
+  else if (/\bERROR\b|Traceback \(most recent|^\w*(Error|Exception)\b/.test(l)) cls = 'err';
+  else if (/\bWARNING\b/.test(l)) cls = 'warn';
+  else if (/tokens generated at/.test(l)) cls = 'metric';
+  logPrevCls = cls;
+  const m = l.match(/^(\d\d:\d\d:\d\d(?:\.\d+)?)(\s+)([A-Z]+:)(.*)$/);
+  const body = m ? `<span class="ts">${m[1]}</span>${m[2]}<span class="lvl">${m[3]}</span>${esc(m[4])}` : (esc(l) || ' ');
+  return `<span class="ln ${cls}">${body}</span>`;
+}
+
+function renderStats(m) {
+  const box = $('#logStats');
+  if (!m) { box.innerHTML = ''; return; }
+  const tile = (k, v, unit, sub) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}<small>${unit}</small></div><div class="s">${sub}</div></div>`;
+  box.innerHTML =
+    tile('Decode', m.decode_tps, 'T/s', `${m.tokens.toLocaleString()} tokens`) +
+    tile('Prompt', m.prompt_tps ? Math.round(m.prompt_tps).toLocaleString() : '—', m.prompt_tps ? 'T/s' : '', `${m.prompt_tokens.toLocaleString()} tokens · ${m.cached_pct}% cached`) +
+    tile('Draft accepted', m.draft_total ? m.draft_pct : '—', m.draft_total ? '%' : '', m.draft_total ? `${m.draft_accepted} of ${m.draft_total} (MTP)` : 'no drafting') +
+    tile('First token', m.first_token_s ? m.first_token_s : '—', m.first_token_s ? 's' : '', m.total_s ? `total ${m.total_s} s` : '') +
+    `<div class="strip-cap">Last request: ${esc(m.request)} at ${esc(m.at)}</div>`;
+}
+
+async function pollLog() {
+  if (!logName) return;
+  const pre = $('#logPre');
+  try {
+    const r = await (await fetch(`/api/engines/${encodeURIComponent(logName)}/log?from=${logNext}`, {cache: 'no-store'})).json();
+    if (!r.exists) {
+      pre.innerHTML = `<div class="none">No log yet. Baton saves ${esc(logName)}'s output here whenever it starts ${esc(logName)} (the Use button, the gateway, or after a game). If you start it yourself, or set <code>show_window = true</code> in baton.toml, the output stays in its own console window.</div>`;
+      $('#logSub').textContent = r.path || '';
+      renderStats(null);
+      return;
+    }
+    if (logNext >= 0 && r.size < logNext) { logNext = -1; pre.innerHTML = ''; logLines = 0; return pollLog(); }
+    $('#logSub').textContent = r.path;
+    if (r.last !== undefined) renderStats(r.last);
+    if (r.text) {
+      const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+      if (logNext < 0) { pre.innerHTML = ''; logLines = 0; logPrevCls = ''; }
+      const lines = r.text.replace(/\n$/, '').split('\n');
+      pre.insertAdjacentHTML('beforeend', lines.map(logLine).join(''));
+      logLines += lines.length;
+      while (logLines > 6000 && pre.firstChild) { pre.firstChild.remove(); logLines--; }
+      if (atBottom || logNext < 0) pre.scrollTop = pre.scrollHeight; else $('#logJump').hidden = false;
+    }
+    logNext = r.next;
+  } catch (e) {}
+}
+
+function openLog(name) {
+  closeGames();
+  logName = name; logNext = -1; logLines = 0; logPrevCls = '';
+  $('#logTitle').textContent = name + ' log';
+  $('#logPre').innerHTML = '';
+  $('#logStats').innerHTML = '';
+  $('#logJump').hidden = true;
+  drawerOpener = document.activeElement;
+  $('#scrim').hidden = $('#logDrawer').hidden = false;
+  requestAnimationFrame(() => { $('#scrim').classList.add('on'); $('#logDrawer').classList.add('on'); });
+  document.body.style.overflow = 'hidden';
+  pollLog();
+  logTimer = setInterval(pollLog, 1000);
+  setTimeout(() => $('#logClose').focus(), 60);
+}
+
+function closeLog() {
+  if (!logName) return;
+  logName = null;
+  clearInterval(logTimer);
+  $('#scrim').classList.remove('on'); $('#logDrawer').classList.remove('on');
+  setTimeout(() => { if (!logName && !drawerOpen) $('#scrim').hidden = true; if (!logName) $('#logDrawer').hidden = true; }, 260);
+  document.body.style.overflow = '';
+  if (drawerOpener && drawerOpener.focus) drawerOpener.focus();
+}
+
+$('#logClose').onclick = closeLog;
+$('#logJump').onclick = () => { const p = $('#logPre'); p.scrollTop = p.scrollHeight; $('#logJump').hidden = true; };
+$('#logPre').addEventListener('scroll', () => { const p = $('#logPre'); if (p.scrollHeight - p.scrollTop - p.clientHeight < 40) $('#logJump').hidden = true; });
+$('#logNotepad').onclick = async () => {
+  try { await gapi(`/api/engines/${encodeURIComponent(logName)}/log/open`); } catch (e) { toast(e.message, {err: true}); }
+};
+document.addEventListener('keydown', ev => { if (logName && ev.key === 'Escape') closeLog(); });
+if (location.hash.startsWith('#log=')) setTimeout(() => openLog(decodeURIComponent(location.hash.slice(5))), 0);
+
+function renderHits(v) {
+  const hits = v.hits || [];
+  let html = hits.map(h => `<div class="hit"><span class="chip" style="color:${tagColor(h.kind)}">${esc(h.kind)}</span><b>${esc(h.kind === 'game' ? gameTitle(h) : h.exe)}</b><span class="sub" style="margin:0">${esc(h.match ? h.rule + ' · ' + h.match : h.rule)}${h.pid ? ' · pid ' + h.pid : ''}</span></div>`).join('');
+  if (v.hold) html = `<div class="hit"><span class="chip" style="color:var(--c-game)">hold</span><b>${esc(v.hold.reason)}</b><span class="sub" style="margin:0">${v.hold.until && !v.hold.until.startsWith('0001') ? 'until ' + new Date(v.hold.until).toLocaleTimeString() : 'until released'}</span></div>` + html;
+  $('#hits').innerHTML = (html || '<div class="empty">No game or stream detected. Games free both GPUs; a stream holds ComfyUI and keeps the LLM while GPU ' + esc(v.policy.stream_encode_gpu) + ' has ' + esc(v.policy.stream_min_free_mib) + ' MiB free.</div>')
+    + '<div style="margin-top:12px"><button class="linkbtn" onclick="openGames()">Manage games →</button></div>';
+}
+
+// --- games drawer ---
+const ICON = {
+  pad: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01"/><path d="M17.3 5H6.7a4 4 0 0 0-3.96 3.43l-.73 5.1A3 3 0 0 0 7.2 16.1L9 14h6l1.8 2.1a3 3 0 0 0 5.2-2.57l-.74-5.1A4 4 0 0 0 17.3 5z"/></svg>',
+  folder: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.2h7.5A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>',
+  app: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M3 9h18M6.5 6.8h.01M9 6.8h.01"/></svg>',
+  ban: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M6 18L18 6"/></svg>',
+  x: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  plus: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+};
+const PRETTY = {steam:'Steam', epic:'Epic Games', gog:'GOG', xbox:'Xbox', ea:'EA app', ubisoft:'Ubisoft Connect', emulator:'Emulators'};
+const LIST_NAME = {folder:'library folders', game:'games', ignore:'never count'};
+let drawerOpen = false, drawerOpener = null, gamesTimer = null, gamesSig = '';
+
+function splitPath(p) {
+  const i = p.lastIndexOf('\\');
+  if (i < 0 || p.length <= 3) return [p, ''];
+  return [p.slice(i + 1), p.slice(0, i + 1)];
+}
+const gRow = (icon, name, sub, act) => `<div class="row"><span class="ic">${icon}</span><div class="tx"><div class="nm">${name}</div>${sub ? `<div class="pt" title="${esc(sub)}"><bdi>${esc(sub)}</bdi></div>` : ''}</div><div class="act">${act || ''}</div></div>`;
+// A readable name for a running game: its folder under the library or
+// launcher, not the shipping exe ("Stellar Blade", not "SB-Win64-Shipping").
+function gameTitle(h) {
+  const p = h.path || '';
+  if (h.match && p.toLowerCase().startsWith(h.match.toLowerCase() + '\\')) {
+    const t = p.slice(h.match.length + 1).split('\\')[0];
+    if (t && !/\.exe$/i.test(t)) return t;
+  }
+  const m = p.match(/\\(?:steamapps\\common|Epic Games|XboxGames|GOG Games|GOG Galaxy\\Games|EA Games)\\([^\\]+)/i);
+  if (m) return m[1];
+  return (h.exe || '').replace(/\.exe$/i, '');
+}
+const liveTag = t => `<span class="live"><i></i>${t}</span>`;
+
+function listRows(entries, kind, icon, empty) {
+  if (!entries.length) return `<div class="empty-row">${empty}</div>`;
+  return '<div class="rows">' + entries.map(e => {
+    const [n, parent] = splitPath(e.path);
+    const name = esc(kind === 'game' ? n.replace(/\.exe$/i, '') : n) + (e.running ? liveTag('running') : '');
+    return gRow(icon, name, parent || e.path, `<button class="icon-btn rm" title="Remove" aria-label="Remove ${esc(n)}" data-rm="${kind}" data-path="${esc(e.path)}">${ICON.x}</button>`);
+  }).join('') + '</div>';
+}
+
+function section(title, count, desc, body) {
+  return `<section class="sec"><div class="sec-h"><h4>${title}</h4>${count ? `<span class="count">${count}</span>` : ''}</div>${desc ? `<p class="sec-d">${desc}</p>` : ''}${body}</section>`;
+}
+
+function renderGames(g) {
+  const sig = JSON.stringify(g);
+  if (sig === gamesSig) return;
+  gamesSig = sig;
+  const input = $('#drBody input[name=p]');
+  const keep = input ? {v: input.value, f: document.activeElement === input, s: input.selectionStart} : null;
+  let h = '';
+  if (g.running.length) h += section('Playing now', 0, '', '<div class="rows">' + g.running.map(r =>
+    gRow(ICON.pad, esc(gameTitle(r)), r.exe, liveTag('GPUs free'))).join('') + '</div>');
+  if (g.suggestions.length) h += section('Using your GPU', 0, 'Holding VRAM, but not a game Baton knows. Is one of these a game?',
+    '<div class="sugg"><div class="rows">' + g.suggestions.map(s => gRow(ICON.app, esc(s.name), s.path,
+      `<span class="chip">${gib(s.mib)} GiB</span><button class="mini primary" data-add="game" data-path="${esc(s.path)}">Add game</button><button class="mini" data-add="ignore" data-path="${esc(s.path)}">Ignore</button>`)).join('') + '</div></div>');
+  h += section('Library folders', g.folders.length, 'Every program inside counts as a game.',
+    listRows(g.folders, 'folder', ICON.folder, 'No folders yet.') +
+    `<div class="adders"><button class="ghost btn-icon" data-pick="folder">${ICON.plus}Add folder…</button></div>
+     <form class="paste" data-paste><input name="p" placeholder="or paste a folder or .exe path" autocomplete="off" spellcheck="false" aria-label="Folder or program path"><button>Add</button></form>`);
+  h += section('Single games', g.games.length, 'One program, wherever it is installed.',
+    listRows(g.games, 'game', ICON.app, 'None yet.') +
+    `<div class="adders"><button class="ghost btn-icon" data-pick="game">${ICON.plus}Add game…</button></div>`);
+  h += section('Never count', g.ignore.length, 'Launchers and tools that live next to your games.',
+    listRows(g.ignore, 'ignore', ICON.ban, 'Nothing excluded.') +
+    `<div class="adders"><button class="ghost btn-icon" data-pick="ignore-folder">${ICON.plus}Folder…</button><button class="ghost btn-icon" data-pick="ignore-game">${ICON.plus}Program…</button></div>`);
+  h += `<section class="sec"><div class="sec-h"><h4>Built-in launchers</h4><button class="switch" role="switch" aria-checked="${g.builtin.on}" aria-label="Find games installed by launchers" data-builtin></button></div>
+    <p class="sec-d">Games installed by these are found on their own.</p>
+    <div class="chips ${g.builtin.on ? '' : 'off'}">${g.builtin.names.map(n => `<span class="chip">${esc(PRETTY[n] || n)}</span>`).join('')}</div></section>`;
+  $('#drBody').innerHTML = h;
+  $('#drFoot').innerHTML = `Saved in <code>${esc(splitPath(g.file)[0])}</code> next to baton.toml · changes apply right away`;
+  if (keep) {
+    const i = $('#drBody input[name=p]');
+    i.value = keep.v;
+    if (keep.f) { i.focus(); try { i.setSelectionRange(keep.s, keep.s); } catch (e) {} }
+  }
+}
+
+async function loadGames() {
+  try { renderGames(await (await fetch('/api/games', {cache: 'no-store'})).json()); } catch (e) {}
+}
+
+async function gapi(path, body) {
+  const r = await fetch(path, {method: 'POST', headers: {'X-Baton': 'dashboard', 'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+let toastTimer;
+function toast(msg, opts = {}) {
+  const t = $('#toast');
+  t.className = 'toast on' + (opts.err ? ' err' : '');
+  t.innerHTML = `<span>${esc(msg)}</span>` + (opts.undo ? '<button type="button">Undo</button>' : '');
+  if (opts.undo) t.querySelector('button').onclick = () => { t.className = 'toast'; opts.undo(); };
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = 'toast'; }, opts.undo ? 6000 : 3500);
+}
+
+async function changed() { gamesSig = ''; await loadGames(); setTimeout(poll, 100); }
+
+function short(p) { const [n] = splitPath(p); return n.replace(/\.exe$/i, ''); }
+
+$('#drBody').addEventListener('click', async ev => {
+  const b = ev.target.closest('button');
+  if (!b) return;
+  try {
+    if (b.dataset.pick) {
+      b.disabled = true;
+      const foot = $('#drFoot'), was = foot.innerHTML;
+      foot.innerHTML = '<span style="display:inline-flex;gap:8px;align-items:center"><span class="spin"></span>Choose in the Windows dialog… (it may open behind this window)</span>';
+      try {
+        const r = await gapi('/api/games/pick', {kind: b.dataset.pick});
+        if (!r.cancelled) toast(`Added ${short(r.path)} to ${LIST_NAME[r.kind]}`);
+      } finally { foot.innerHTML = was; b.disabled = false; }
+      await changed();
+    } else if (b.dataset.add) {
+      const kind = b.dataset.add, path = b.dataset.path;
+      await gapi('/api/games/add', {kind, path});
+      toast(kind === 'game' ? `${short(path)} now counts as a game` : `Baton will ignore ${short(path)}`, {undo: async () => { await gapi('/api/games/remove', {kind, path}); changed(); }});
+      await changed();
+    } else if (b.dataset.rm) {
+      const kind = b.dataset.rm, path = b.dataset.path;
+      await gapi('/api/games/remove', {kind, path});
+      toast(`Removed ${short(path)}`, {undo: async () => { await gapi('/api/games/add', {kind, path}); changed(); }});
+      await changed();
+    } else if (b.dataset.builtin !== undefined) {
+      const on = b.getAttribute('aria-checked') !== 'true';
+      b.setAttribute('aria-checked', on);
+      await gapi('/api/games/builtin', {on});
+      await changed();
+    }
+  } catch (e) { toast(e.message, {err: true}); await changed(); }
+});
+
+$('#drBody').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const input = ev.target.querySelector('input');
+  const path = input.value.trim();
+  if (!path) return;
+  try {
+    const r = await gapi('/api/games/add', {kind: 'auto', path});
+    input.value = '';
+    toast(`Added ${short(r.path)} to ${LIST_NAME[r.kind]}`);
+    await changed();
+  } catch (e) { toast(e.message, {err: true}); }
+});
+
+function openGames() {
+  if (drawerOpen) return;
+  drawerOpen = true;
+  drawerOpener = document.activeElement;
+  $('#scrim').hidden = $('#drawer').hidden = false;
+  requestAnimationFrame(() => { $('#scrim').classList.add('on'); $('#drawer').classList.add('on'); });
+  document.body.style.overflow = 'hidden';
+  if (location.hash !== '#games') history.replaceState(null, '', '#games');
+  gamesSig = '';
+  loadGames();
+  gamesTimer = setInterval(loadGames, 3000);
+  setTimeout(() => $('#drClose').focus(), 60);
+}
+
+function closeGames() {
+  if (!drawerOpen) return;
+  drawerOpen = false;
+  $('#scrim').classList.remove('on'); $('#drawer').classList.remove('on');
+  setTimeout(() => { if (!drawerOpen) $('#scrim').hidden = $('#drawer').hidden = true; }, 260);
+  document.body.style.overflow = '';
+  clearInterval(gamesTimer);
+  if (location.hash === '#games') history.replaceState(null, '', location.pathname);
+  if (drawerOpener && drawerOpener.focus) drawerOpener.focus();
+}
+
+$('#scrim').onclick = () => { closeGames(); closeLog(); };
+$('#drClose').onclick = closeGames;
+document.addEventListener('keydown', ev => {
+  if (!drawerOpen) return;
+  if (ev.key === 'Escape') { closeGames(); return; }
+  if (ev.key === 'Tab') { // keep focus inside the drawer
+    const f = [...$('#drawer').querySelectorAll('button:not([disabled]),input')].filter(x => x.offsetParent);
+    if (!f.length) return;
+    if (ev.shiftKey && document.activeElement === f[0]) { ev.preventDefault(); f[f.length - 1].focus(); }
+    else if (!ev.shiftKey && document.activeElement === f[f.length - 1]) { ev.preventDefault(); f[0].focus(); }
+  }
+});
+window.addEventListener('hashchange', () => location.hash === '#games' ? openGames() : closeGames());
+if (location.hash === '#games') openGames();
+
+function renderGateway(v) {
+  const gw = v.gateway || {};
+  const url = gw.enabled ? `http://${gw.listen}/v1` : 'disabled';
+  const ms = models.map(m => `<code>${esc(m.id)}</code>`).join(' ') || '<span class="empty">none</span>';
+  const p = v.policy || {};
+  const rm = v.remote || {};
+  let phone;
+  if (!rm.enabled) phone = '<span class="empty">off · set <code>[remote] tailscale = true</code> in baton.toml</span>';
+  else if (!rm.ip) phone = `<span class="empty">waiting for Tailscale${rm.error ? ' · ' + esc(rm.error) : ''}</span>`;
+  else phone = `<code>${esc(rm.dashboard)}</code>` + (rm.gateway ? `<br><span class="empty">gateway</span> <code>${esc(rm.gateway)}</code>` : '');
+  $('#gw').innerHTML = `<div class="kv">
+    <span>Base URL</span><span><code>${esc(url)}</code></span>
+    <span>On your phone</span><span>${phone}</span>
+    <span>API key</span><span><code>baton key</code> prints it</span>
+    <span>Models</span><span>${ms}</span>
+    <span>Game</span><span>frees every GPU (running jobs get ${esc(p.game_drain)}), ${p.restore ? 'restores after' : 'no restore'}</span>
+    <span>Stream</span><span>${p.stream_hold_comfyui ? 'ComfyUI held, ' : ''}LLM kept while GPU ${esc(p.stream_encode_gpu)} ≥ ${esc(p.stream_min_free_mib)} MiB free</span>
+  </div>`;
+}
+
+function renderEvents(v) {
+  for (const e of v.events || []) if (e.seq > evSeq) { evList.push(e); evSeq = e.seq; }
+  if (evList.length > 300) evList = evList.slice(-300);
+  $('#events').innerHTML = evList.slice().reverse().map(e => `<div class="ev"><span class="t" title="${esc(new Date(e.at).toLocaleString())}">${new Date(e.at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span><span class="lv ${esc(e.level)}"></span><span class="k">${esc(e.kind)}</span><span class="m">${esc(e.msg)}</span></div>`).join('') || '<div class="empty">No events yet.</div>';
+}
+
+async function poll() {
+  clearTimeout(poll.t);
+  try {
+    const r = await fetch('/api/status?since=' + evSeq, {cache:'no-store'});
+    view = await r.json();
+    if (Date.now() - lastModels > 10000) {
+      lastModels = Date.now();
+      models = await (await fetch('/api/models')).json() || [];
+    }
+    renderHeader(view); renderEngines(view); renderGPUs(view); renderMem(view); renderHits(view); renderGateway(view); renderEvents(view);
+    $('#conn').textContent = 'live'; $('#conn').className = 'conn';
+  } catch (e) {
+    $('#conn').textContent = 'daemon offline'; $('#conn').className = 'conn off';
+  }
+  poll.t = setTimeout(poll, 1500);
+}
+poll();
+</script>
+</body>
+</html>

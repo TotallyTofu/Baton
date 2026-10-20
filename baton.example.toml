@@ -1,0 +1,92 @@
+# baton.toml: copy this file to baton.toml next to baton.exe and edit it.
+# `baton config` checks it. GPU numbers are NVIDIA's order (as nvidia-smi shows).
+# Paths may use Windows variables such as %APPDATA% and %LOCALAPPDATA%.
+
+[daemon]
+listen = "127.0.0.1:9797"   # dashboard + control API (loopback only)
+poll = "2s"
+tray = true
+
+[gateway]
+# One OpenAI-compatible endpoint for every LLM engine: point clients at
+# http://127.0.0.1:9799/v1 with the key from `baton key`. Asking for a model
+# that isn't loaded swaps engines automatically.
+enabled = true
+listen = "127.0.0.1:9799"
+require_key = true
+default_engine = "tabby"    # model names no engine claims go here ("" = 404)
+
+[remote]
+# Also answer on this PC's Tailscale address, for Tailscale devices only (the
+# LAN still can't reach baton). Then run `baton firewall` once.
+tailscale = false
+
+[policy]
+restore = true              # bring the LLM back after a game or stream ends
+linger = "20s"              # a game/stream must be gone this long first (launchers restart games)
+release_wait = "60s"        # how long to wait for VRAM to read free after a release
+residual_mib = 900          # VRAM a released engine may keep per GPU (CUDA context) and still count as freed
+busy_util_pct = 20          # an LLM using more GPU than this is generating; a switch waits for it
+switch_drain = "10m"        # longest a switch waits for the holder's current work
+comfy_return_after = "0s"   # >0: after ComfyUI idles this long, give the GPUs back to the LLM it took them from
+
+[policy.game]
+drain = "15s"               # running work gets this long before a game takes the GPUs
+
+[policy.stream]
+encode_gpu = 0              # the card that encodes your stream (usually the one driving the display)
+min_free_mib = 768          # keep the LLM loaded during a stream only while that card has this much free
+hold_comfyui = true         # free ComfyUI and hold new jobs while streaming (needs the gate node to hold)
+comfyui_drain = "60s"       # a running ComfyUI job may finish this long, then it is interrupted
+
+[detect]
+games = true                # Steam, Epic, GOG, Xbox, EA, Ubisoft libraries and common emulators
+# NVENC sessions owned by these mean "streaming" (Apollo/Sunshine, Steam Remote Play)
+stream_encoders = ["sunshine.exe", "apollo.exe", "steam.exe", "streaming_client.exe"]
+ignore_exe = []
+
+# Game folders and single games are easiest to manage in the dashboard
+# (Games button); they are saved in games.json next to this file.
+# Regex rules for anything unusual can go here:
+# [[claim]]
+# name = "my-emulator-frontend"
+# exe = ["SomeFrontend.exe"]
+# action = "game"           # or "stream"
+
+# --- engines: keep the ones you use, delete the rest ---
+
+[[engine]]
+name = "tabby"
+kind = "tabby"              # TabbyAPI (ExLlamaV3)
+url = "http://127.0.0.1:5000"
+dir = 'D:\tabbyAPI'
+start = ['cmd.exe', '/c', 'start.bat']
+gpus = [0, 1]
+release = "stop"            # stop the server; a restart reloads exactly what config.yml says
+show_window = false         # true: TabbyAPI in its own console instead of baton's log viewer
+ready_timeout = "10m"
+serves = ["qwen27b"]        # aliases; the model named in config.yml always works
+
+[[engine]]
+name = "unsloth"
+kind = "unsloth"            # Unsloth Studio (stays open; baton unloads/reloads its model)
+url = "http://127.0.0.1:8888"
+gpus = [0, 1]
+# Create a key in Unsloth Studio, then: setx UNSLOTH_API_KEY "<key>"
+# Without it baton can free the GPUs but cannot load the model back.
+api_key_env = "UNSLOTH_API_KEY"
+release = "unload"
+# Models the gateway may load into Unsloth by name:
+# [[engine.model]]
+# name = "qwen-9b"
+# model_path = "unsloth/Qwen3.8-9B-GGUF"
+# gguf_variant = "UD-Q4_K_XL"
+# max_seq_length = 32768
+
+[[engine]]
+name = "comfyui"
+kind = "comfyui"            # ComfyUI (models load per job; release = /free)
+url = "http://127.0.0.1:8000"
+desktop_procs_dir = '%APPDATA%\Comfy Desktop\comfy-procs'   # ComfyUI Desktop may move its port; it records the real one here
+gpus = [0, 1]
+release = "free"

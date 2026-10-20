@@ -1,0 +1,14 @@
+# build output
+baton.exe
+baton.exe~
+*.test
+
+# your own settings (start from baton.example.toml)
+baton.toml
+games.json
+games.json.tmp
+
+# local material that isn't part of the project
+*.pdf
+*.log
+__pycache__/
