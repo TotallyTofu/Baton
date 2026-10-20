@@ -144,9 +144,8 @@ func (s *Server) wide() bool {
 func (s *Server) run(w http.ResponseWriter, r *http.Request, what string, fn func(context.Context) error) {
 	if r.URL.Query().Get("wait") == "1" {
 		if err := fn(r.Context()); err != nil {
-			var h *broker.HeldError
 			status := 500
-			if errors.As(err, &h) {
+			if refused(err) {
 				status = 409
 			}
 			fail(w, status, err)
@@ -156,14 +155,22 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request, what string, fn fun
 		return
 	}
 	go func() {
-		if err := fn(context.Background()); err != nil {
-			var h *broker.HeldError
-			if errors.As(err, &h) {
-				s.ev.Warnf("switch", "", "%s refused: %v", what, err)
-			}
+		err := fn(context.Background())
+		var ag *broker.AgroundError
+		// A release that ends aground has logged that itself.
+		if refused(err) && !(errors.As(err, &ag) && ag.For == "") {
+			s.ev.Warnf("switch", "", "%s refused: %v", what, err)
 		}
 	}()
 	writeJSON(w, 202, map[string]any{"ok": true, "accepted": what})
+}
+
+// refused reports whether the broker turned a request down (the cards are
+// reserved, or an engine is aground) rather than failed at it.
+func refused(err error) bool {
+	var h *broker.HeldError
+	var ag *broker.AgroundError
+	return errors.As(err, &h) || errors.As(err, &ag)
 }
 
 func (s *Server) engineAction(w http.ResponseWriter, r *http.Request, rest string) {
@@ -189,6 +196,8 @@ func (s *Server) engineAction(w http.ResponseWriter, r *http.Request, rest strin
 		})
 	case "release":
 		s.run(w, r, "release "+name, func(ctx context.Context) error { return s.b.ReleaseEngine(ctx, name) })
+	case "reclaim":
+		s.run(w, r, "force stop "+name, func(ctx context.Context) error { return s.b.Reclaim(ctx, name) })
 	default:
 		http.NotFound(w, r)
 	}

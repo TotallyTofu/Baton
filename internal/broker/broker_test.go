@@ -18,14 +18,15 @@ import (
 
 // fake is an engine whose state the test controls.
 type fake struct {
-	cfg  config.Engine
-	llm  bool
-	mu   sync.Mutex
-	up   bool
-	load bool
-	busy bool
-	vram int
-	log  *actionLog
+	cfg   config.Engine
+	llm   bool
+	mu    sync.Mutex
+	up    bool
+	load  bool
+	busy  bool
+	vram  int
+	stuck bool // a release short of "stop" leaves its VRAM in place
+	log   *actionLog
 }
 
 type actionLog struct {
@@ -62,7 +63,10 @@ func (f *fake) Probe(context.Context, *telemetry.Snapshot) engine.Status {
 
 func (f *fake) Release(_ context.Context, mode string, _ engine.Status) error {
 	f.mu.Lock()
-	f.load, f.vram, f.busy = false, 0, false
+	f.load, f.busy = false, false
+	if !f.stuck || mode == "stop" {
+		f.vram = 0
+	}
 	if mode == "stop" {
 		f.up = false
 	}
@@ -108,7 +112,7 @@ func newRig(t *testing.T) *rig {
 	cfg := config.Default()
 	cfg.Daemon.StateDir = t.TempDir()
 	cfg.Policy.Linger = config.D(0)
-	cfg.Policy.ReleaseWait = config.D(2 * time.Second)
+	cfg.Policy.ReleaseWait = config.D(1 * time.Second)
 	cfg.Policy.SwitchDrain = config.D(5 * time.Second)
 	cfg.Policy.Game.Drain = config.D(1 * time.Second)
 	cfg.Policy.Stream.ComfyDrain = config.D(1 * time.Second)
@@ -345,5 +349,117 @@ func TestLoadDuringGameIsReleased(t *testing.T) {
 	r.settle(t)
 	if got, want := r.log.String(), "release unsloth unload"; got != want {
 		t.Fatalf("actions = %q, want %q", got, want)
+	}
+}
+
+func engineView(v View, name string) EngineView {
+	for _, e := range v.Engines {
+		if e.Name == name {
+			return e
+		}
+	}
+	return EngineView{}
+}
+
+// stuckTabby holds both cards and keeps its memory through an unload.
+func stuckTabby(r *rig) {
+	r.tabby.cfg.Release, r.tabby.cfg.GameRelease = "unload", "unload"
+	r.tabby.set(func(f *fake) { f.up, f.load, f.vram, f.stuck = true, true, 12000, true })
+}
+
+// A release that leaves memory behind runs the engine aground: the next
+// engine never starts, later tries are refused at once, and ComfyUI jobs wait.
+func TestStuckReleaseRunsAground(t *testing.T) {
+	r := newRig(t)
+	stuckTabby(r)
+	r.b.tick(r.ctx, false)
+	err := r.b.Activate(r.ctx, "unsloth", "", "test")
+	var ag *AgroundError
+	if !errors.As(err, &ag) || ag.Engine != "tabby" || ag.For != "unsloth" || ag.MiB[0] != 12000 {
+		t.Fatalf("activate = %v, want tabby aground", err)
+	}
+	if !strings.Contains(err.Error(), "not starting unsloth") || !strings.Contains(err.Error(), "baton reclaim tabby") {
+		t.Fatalf("message = %q", err)
+	}
+	if got, want := r.log.String(), "release tabby unload"; got != want {
+		t.Fatalf("actions = %q, want %q", got, want)
+	}
+	if a := engineView(r.b.View(0), "tabby").Aground; a == nil || a.MiB[1] != 12000 || a.TotalMiB != 24000 {
+		t.Fatalf("view aground = %+v", a)
+	}
+	if err := r.b.Activate(r.ctx, "unsloth", "", "test"); !errors.As(err, &ag) {
+		t.Fatalf("second activate = %v, want AgroundError", err)
+	}
+	ok, why := r.b.GateAcquire(r.ctx, "p1", 300*time.Millisecond)
+	if ok || strings.HasPrefix(why, "error: ") || !strings.Contains(why, "still holds") {
+		t.Fatalf("gate = %v %q, want the job kept waiting", ok, why)
+	}
+	if got, want := r.log.String(), "release tabby unload"; got != want {
+		t.Fatalf("refusals touched engines: %q", got)
+	}
+	// Memory that frees on its own clears the mark on the next cycle.
+	r.tabby.set(func(f *fake) { f.vram = 0 })
+	r.b.tick(r.ctx, false)
+	if a := engineView(r.b.View(0), "tabby").Aground; a != nil {
+		t.Fatalf("aground should clear once the memory is free: %+v", a)
+	}
+}
+
+// Force stop (baton reclaim) ends a stuck engine whatever its release mode;
+// the mark clears and the switch goes through.
+func TestReclaimClearsAground(t *testing.T) {
+	r := newRig(t)
+	stuckTabby(r)
+	r.b.tick(r.ctx, false)
+	var ag *AgroundError
+	if err := r.b.Activate(r.ctx, "unsloth", "", "test"); !errors.As(err, &ag) {
+		t.Fatalf("activate = %v, want AgroundError", err)
+	}
+	if err := r.b.Reclaim(r.ctx, "tabby"); err != nil {
+		t.Fatal(err)
+	}
+	if a := engineView(r.b.View(0), "tabby").Aground; a != nil {
+		t.Fatalf("reclaim should clear aground: %+v", a)
+	}
+	if err := r.b.Activate(r.ctx, "unsloth", "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := r.log.String(), "release tabby unload, release tabby stop, acquire unsloth"; got != want {
+		t.Fatalf("actions = %q, want %q", got, want)
+	}
+}
+
+// strict_release = false: warn and start the next engine anyway.
+func TestLaxReleaseContinues(t *testing.T) {
+	r := newRig(t)
+	r.b.cfg.Policy.StrictRelease = false
+	stuckTabby(r)
+	r.b.tick(r.ctx, false)
+	if err := r.b.Activate(r.ctx, "unsloth", "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := r.log.String(), "release tabby unload, acquire unsloth"; got != want {
+		t.Fatalf("actions = %q, want %q", got, want)
+	}
+	if a := engineView(r.b.View(0), "tabby").Aground; a != nil {
+		t.Fatalf("no aground without strict_release: %+v", a)
+	}
+}
+
+// A game or hold can't be blocked: the stuck engine is marked aground and the
+// others are still released.
+func TestHoldReleasesOthersPastAground(t *testing.T) {
+	r := newRig(t)
+	stuckTabby(r)
+	r.comfy.set(func(f *fake) { f.load, f.vram = true, 6000 })
+	r.b.tick(r.ctx, false)
+	r.b.SetHold("game", 0)
+	r.settle(t)
+	if got, want := r.log.String(), "release tabby unload, release comfyui free"; got != want {
+		t.Fatalf("actions = %q, want %q", got, want)
+	}
+	v := r.b.View(0)
+	if v.Mode != Hold || engineView(v, "tabby").Aground == nil || engineView(v, "comfyui").Aground != nil {
+		t.Fatalf("mode = %s, tabby aground = %v, comfyui aground = %v", v.Mode, engineView(v, "tabby").Aground, engineView(v, "comfyui").Aground)
 	}
 }

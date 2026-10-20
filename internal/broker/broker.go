@@ -41,6 +41,70 @@ type HeldError struct {
 
 func (e *HeldError) Error() string { return fmt.Sprintf("GPUs reserved (%s): %s", e.Mode, e.Why) }
 
+// AgroundError says a released engine never gave its memory back, so nothing
+// may start on those cards: it could run out of memory (strict_release).
+type AgroundError struct {
+	Engine string
+	MiB    map[int]int // still held per GPU
+	Waited time.Duration
+	For    string // the engine that was to start, if any
+}
+
+func (e *AgroundError) Error() string {
+	gpus := make([]int, 0, len(e.MiB))
+	for g := range e.MiB {
+		gpus = append(gpus, g)
+	}
+	sort.Ints(gpus)
+	var held []string
+	for _, g := range gpus {
+		held = append(held, fmt.Sprintf("%.1f GiB on GPU %d", float64(e.MiB[g])/1024, g))
+	}
+	if len(held) == 0 {
+		held = []string{"its memory"}
+	}
+	msg := fmt.Sprintf("%s still holds %s after %s", e.Engine, strings.Join(held, ", "), roughly(e.Waited))
+	switch e.For {
+	case "":
+		msg += "; nothing else starts there until it lets go"
+	case e.Engine:
+		msg += "; not starting it again so it can't run out of memory"
+	default:
+		msg += fmt.Sprintf("; not starting %s so it can't run out of memory", e.For)
+	}
+	return msg + fmt.Sprintf(" (Force stop, or: baton reclaim %s)", e.Engine)
+}
+
+// roughly formats a wait for people: 45s, 3m, 1.5h.
+func roughly(d time.Duration) string {
+	switch {
+	case d < 2*time.Minute:
+		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
+	case d < 2*time.Hour:
+		return fmt.Sprintf("%dm", int(d.Round(time.Minute)/time.Minute))
+	default:
+		return fmt.Sprintf("%.1fh", d.Hours())
+	}
+}
+
+// agroundRec is an engine that kept its memory after a release. It blocks
+// its cards until the memory reads free or you reclaim it.
+type agroundRec struct {
+	since  time.Time
+	waited time.Duration // the release wait that ran out
+	mib    map[int]int   // still held per GPU, refreshed every cycle
+	gpus   []int         // the cards it is stuck on
+	procs  []win.Proc    // what it had when released: a killed process may linger
+}
+
+func (a *agroundRec) err(name, target string) *AgroundError {
+	mib := make(map[int]int, len(a.mib))
+	for g, v := range a.mib {
+		mib[g] = v
+	}
+	return &AgroundError{Engine: name, MiB: mib, Waited: a.waited + time.Since(a.since), For: target}
+}
+
 type op struct {
 	key    string
 	name   string
@@ -105,6 +169,7 @@ type Broker struct {
 	wake         chan struct{}
 	noticed      map[string]time.Time
 	since        map[string]time.Time // when each engine started occupying the cards
+	aground      map[string]*agroundRec
 	remote       func() (ip, errText string)
 }
 
@@ -123,7 +188,7 @@ func New(cfg *config.Config, tel *telemetry.Sampler, ev *events.Log, det *detect
 		headroomDone: map[string]bool{}, inflight: map[string]int{},
 		gateWait: map[string]gateEntry{}, gateRun: map[string]gateEntry{},
 		byKey: map[string]*op{}, wake: make(chan struct{}, 1), noticed: map[string]time.Time{},
-		since: map[string]time.Time{},
+		since: map[string]time.Time{}, aground: map[string]*agroundRec{},
 	}
 	for _, e := range engines {
 		b.byName[e.Config().Name] = e
@@ -285,6 +350,7 @@ func (b *Broker) tick(ctx context.Context, first bool) {
 	b.snap, b.hits = snap, hits
 	for _, s := range statuses {
 		b.st[s.Name] = s
+		b.settleAgroundLocked(s.Name, snap, s)
 	}
 	b.trackSinceLocked(statuses, first, now)
 	if first {
@@ -551,7 +617,9 @@ func (b *Broker) busy(e engine.Engine, s engine.Status) (bool, string) {
 	if s.Busy {
 		return true, s.BusyWhy
 	}
-	if e.IsLLM() && s.Util >= b.cfg.Policy.BusyUtilPct {
+	// GPU load stands in for requests that bypass the gateway, unless the
+	// engine can see those requests itself (TabbyAPI, from its log).
+	if e.IsLLM() && !s.BusyExact && s.Util >= b.cfg.Policy.BusyUtilPct {
 		return true, fmt.Sprintf("GPU at %.0f%% (generating)", s.Util)
 	}
 	return false, ""
@@ -590,14 +658,52 @@ func (b *Broker) drain(ctx context.Context, e engine.Engine, max time.Duration, 
 	}
 }
 
-// waitFreed waits until the driver shows e's memory on gpus gone. before
-// holds the processes the engine had when it was released: a killed process
+// leftOn is the memory an engine still holds on gpus, per GPU above the
+// residual. procs are processes it had when released: a killed process
 // lingers while the driver tears it down, and by then it no longer looks like
 // the engine (its port is closed), so it is tracked by PID and start time.
-func (b *Broker) waitFreed(ctx context.Context, e engine.Engine, gpus []int, before []win.Proc) {
+func (b *Broker) leftOn(snap *telemetry.Snapshot, s engine.Status, gpus []int, procs []win.Proc) map[int]int {
+	counted := map[int]bool{}
+	for _, pid := range s.PIDs {
+		counted[pid] = true
+	}
+	var lingering []int
+	if snap != nil && snap.Tree != nil {
+		for _, p := range procs {
+			if cur, ok := snap.Tree.ByPID[p.PID]; ok && !counted[p.PID] && (p.Start == 0 || cur.Start == p.Start) {
+				counted[p.PID] = true
+				lingering = append(lingering, p.PID)
+			}
+		}
+	}
+	var extra map[int]uint64
+	if snap != nil {
+		extra, _ = snap.VRAM(lingering)
+	}
+	out := map[int]int{}
+	for _, g := range gpus {
+		if v := s.VRAMMiB[g] + int(extra[g]>>20); v > b.residual() {
+			out[g] = v
+		}
+	}
+	return out
+}
+
+// waitFreed waits until the driver shows e's memory on gpus gone. before
+// holds the processes the engine had when it was released. If the memory
+// stays, strict_release marks the engine aground and returns *AgroundError.
+func (b *Broker) waitFreed(ctx context.Context, e engine.Engine, gpus []int, before []win.Proc) error {
 	name := e.Config().Name
-	deadline := time.Now().Add(b.cfg.Policy.ReleaseWait.Duration)
+	wait := b.cfg.Policy.ReleaseWait.Duration
+	deadline := time.Now().Add(wait)
 	start := time.Now()
+	b.mu.Lock()
+	if a := b.aground[name]; a != nil {
+		// What it left behind last time still counts, or a reclaim that finds
+		// no live engine would read as freed.
+		before = append(append([]win.Proc(nil), before...), a.procs...)
+	}
+	b.mu.Unlock()
 	for {
 		snap := b.tel.Sample()
 		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -606,36 +712,73 @@ func (b *Broker) waitFreed(ctx context.Context, e engine.Engine, gpus []int, bef
 		b.mu.Lock()
 		b.st[s.Name] = s
 		b.mu.Unlock()
-		counted := map[int]bool{}
-		for _, pid := range s.PIDs {
-			counted[pid] = true
-		}
-		var lingering []int
-		for _, p := range before {
-			if cur, ok := snap.Tree.ByPID[p.PID]; ok && !counted[p.PID] && (p.Start == 0 || cur.Start == p.Start) {
-				lingering = append(lingering, p.PID)
-			}
-		}
-		extra, _ := snap.VRAM(lingering)
+		held := b.leftOn(snap, s, gpus, before)
 		left := 0
-		for _, g := range gpus {
-			if v := s.VRAMMiB[g] + int(extra[g]>>20); v > b.residual() {
-				left += v
-			}
+		for _, v := range held {
+			left += v
 		}
 		if left == 0 {
 			b.ev.Infof("release", name, "%s released its VRAM in %.1fs", name, time.Since(start).Seconds())
-			return
+			b.mu.Lock()
+			b.settleAgroundLocked(name, snap, s)
+			b.mu.Unlock()
+			return nil
 		}
 		if time.Now().After(deadline) {
-			b.ev.Warnf("release", name, "%s still holds %d MiB after %s; continuing", name, left, b.cfg.Policy.ReleaseWait.Duration)
-			return
+			if !b.cfg.Policy.StrictRelease {
+				b.ev.Warnf("release", name, "%s still holds %d MiB after %s; continuing", name, left, wait)
+				return nil
+			}
+			cards := make([]int, 0, len(held))
+			for g := range held {
+				cards = append(cards, g)
+			}
+			sort.Ints(cards)
+			b.mu.Lock()
+			a := &agroundRec{since: time.Now(), waited: wait, mib: held, gpus: cards, procs: before}
+			if old := b.aground[name]; old != nil {
+				a.since, a.waited = old.since, old.waited
+			}
+			b.aground[name] = a
+			err := a.err(name, "")
+			b.mu.Unlock()
+			b.ev.Warnf("release", name, "aground: %v", err)
+			return err
 		}
 		b.stage("waiting for %s to free %d MiB", name, left)
-		if sleep(ctx, time.Second) != nil {
-			return
+		if err := sleep(ctx, time.Second); err != nil {
+			return err
 		}
 	}
+}
+
+// settleAgroundLocked drops name's aground mark once its memory reads free on
+// the cards it was stuck on, and otherwise refreshes what it still holds.
+func (b *Broker) settleAgroundLocked(name string, snap *telemetry.Snapshot, s engine.Status) {
+	a := b.aground[name]
+	if a == nil {
+		return
+	}
+	if left := b.leftOn(snap, s, a.gpus, a.procs); len(left) > 0 {
+		a.mib = left
+		return
+	}
+	delete(b.aground, name)
+	b.ev.Infof("release", name, "%s freed its memory; GPU(s) %v are usable again", name, a.gpus)
+}
+
+// agroundOn returns the error for an aground engine stuck on any of gpus,
+// target included: starting it again beside its own leftovers can fail too.
+func (b *Broker) agroundOn(gpus []int, target string) *AgroundError {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, e := range b.engines {
+		name := e.Config().Name
+		if a := b.aground[name]; a != nil && overlap(a.gpus, gpus) {
+			return a.err(name, target)
+		}
+	}
+	return nil
 }
 
 func (b *Broker) releaseOne(ctx context.Context, e engine.Engine, mode string, gpus []int) error {
@@ -651,14 +794,15 @@ func (b *Broker) releaseOne(ctx context.Context, e engine.Engine, mode string, g
 		b.ev.Errorf("release", name, "release %s failed: %v", name, err)
 		return fmt.Errorf("release %s: %w", name, err)
 	}
-	b.waitFreed(ctx, e, gpus, before)
+	// It gave up the cards even if its memory is stuck (aground).
+	werr := b.waitFreed(ctx, e, gpus, before)
 	b.mu.Lock()
 	delete(b.since, name)
 	if b.holder == name {
 		b.holder = ""
 	}
 	b.mu.Unlock()
-	return nil
+	return werr
 }
 
 // freeFor releases every engine on gpus. remember records the LLM that held
@@ -688,6 +832,8 @@ func (b *Broker) freeFor(ctx context.Context, gpus []int, drainMax time.Duration
 		if game {
 			mode = e.Config().GameRelease
 		}
+		// An aground engine is recorded and reported, but the rest still
+		// release: a game can't wait for it, and nothing starts here.
 		if err := b.releaseOne(ctx, e, mode, gpus); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -885,6 +1031,11 @@ func (b *Broker) doActivate(ctx context.Context, target engine.Engine, model, wh
 		}
 	}
 	gpus := target.Config().GPUs
+	// Memory an engine kept after its release is still in use: refuse before
+	// pushing anyone else out.
+	if ag := b.agroundOn(gpus, name); ag != nil {
+		return ag
+	}
 	for _, e := range b.engines {
 		if e == target || !overlap(e.Config().GPUs, gpus) {
 			continue
@@ -898,6 +1049,10 @@ func (b *Broker) doActivate(ctx context.Context, target engine.Engine, model, wh
 			return err
 		}
 		if err := b.releaseOne(ctx, e, e.Config().Release, gpus); err != nil {
+			var ag *AgroundError
+			if errors.As(err, &ag) {
+				ag.For = name
+			}
 			return err
 		}
 		if target.Config().Kind == "comfyui" && e.IsLLM() && s.Loaded {
@@ -976,6 +1131,19 @@ func (b *Broker) ReleaseEngine(ctx context.Context, name string) error {
 	}
 	o := b.submit("release:"+name, "release "+name, false, func(ctx context.Context) error {
 		return b.releaseOne(ctx, e, e.Config().Release, e.Config().GPUs)
+	})
+	return wait(ctx, o)
+}
+
+// Reclaim force-stops an engine whatever its release mode (Berth's reclaim),
+// with no drain: you asked. Its aground mark goes once the memory reads free.
+func (b *Broker) Reclaim(ctx context.Context, name string) error {
+	e := b.byName[name]
+	if e == nil {
+		return fmt.Errorf("no engine %q", name)
+	}
+	o := b.submit("reclaim:"+name, "force stop "+name, false, func(ctx context.Context) error {
+		return b.releaseOne(ctx, e, "stop", e.Config().GPUs)
 	})
 	return wait(ctx, o)
 }
@@ -1154,6 +1322,23 @@ func (b *Broker) GateAcquire(ctx context.Context, promptID string, maxWait time.
 			}
 			continue
 		}
+		// Checked before Ready: ComfyUI allocates per job, so even a ComfyUI
+		// that is up could run out of memory beside an aground engine.
+		if ag := b.agroundOn(comfy.Config().GPUs, name); ag != nil {
+			b.mu.Lock()
+			first := b.noticeLocked("gate-aground:"+promptID, time.Hour)
+			b.mu.Unlock()
+			if first {
+				b.ev.Infof("gate", name, "ComfyUI job %s waits: %s", short(promptID), ag.Error())
+			}
+			if time.Now().After(deadline) {
+				return false, ag.Error()
+			}
+			if sleep(ctx, 500*time.Millisecond) != nil {
+				return false, "cancelled"
+			}
+			continue
+		}
 		if b.Ready(name) {
 			b.grant(promptID)
 			return true, ""
@@ -1173,8 +1358,9 @@ func (b *Broker) GateAcquire(ctx context.Context, promptID string, maxWait time.
 			return true, ""
 		}
 		var h *HeldError
-		if errors.As(err, &h) {
-			continue
+		var ag *AgroundError
+		if errors.As(err, &h) || errors.As(err, &ag) {
+			continue // the checks above keep the job waiting
 		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return false, b.stageText()

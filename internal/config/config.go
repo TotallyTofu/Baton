@@ -57,15 +57,16 @@ type Gateway struct {
 }
 
 type Policy struct {
-	Restore      bool     `toml:"restore"`       // reload what a game or stream pushed out once it ends
-	Linger       Duration `toml:"linger"`        // a game or stream must be gone this long before it counts as over
-	ReleaseWait  Duration `toml:"release_wait"`  // how long to wait for VRAM to read free after a release
-	ResidualMiB  int      `toml:"residual_mib"`  // VRAM a released engine may keep per GPU (its CUDA context)
-	BusyUtilPct  float64  `toml:"busy_util_pct"` // an engine's processes above this GPU load count as busy
-	SwitchDrain  Duration `toml:"switch_drain"`  // how long a switch waits for the holder's work to finish
-	Game         GamePol  `toml:"game"`
-	Stream       StreamPo `toml:"stream"`
-	ComfyIdleRet Duration `toml:"comfy_return_after"` // after ComfyUI idles this long, give the GPU back to the engine it took it from (0 = never)
+	Restore       bool     `toml:"restore"`        // reload what a game or stream pushed out once it ends
+	Linger        Duration `toml:"linger"`         // a game or stream must be gone this long before it counts as over
+	ReleaseWait   Duration `toml:"release_wait"`   // how long to wait for VRAM to read free after a release
+	StrictRelease bool     `toml:"strict_release"` // an engine still holding VRAM after release_wait blocks its GPUs (aground) instead of being ignored
+	ResidualMiB   int      `toml:"residual_mib"`   // VRAM a released engine may keep per GPU (its CUDA context)
+	BusyUtilPct   float64  `toml:"busy_util_pct"`  // an engine's processes above this GPU load count as busy
+	SwitchDrain   Duration `toml:"switch_drain"`   // how long a switch waits for the holder's work to finish
+	Game          GamePol  `toml:"game"`
+	Stream        StreamPo `toml:"stream"`
+	ComfyIdleRet  Duration `toml:"comfy_return_after"` // after ComfyUI idles this long, give the GPU back to the engine it took it from (0 = never)
 }
 
 type GamePol struct {
@@ -148,14 +149,15 @@ func Default() *Config {
 		Daemon:  Daemon{Listen: "127.0.0.1:9797", Poll: D(2 * time.Second), Tray: true},
 		Gateway: Gateway{Enabled: true, Listen: "127.0.0.1:9799", RequireKey: true},
 		Policy: Policy{
-			Restore:     true,
-			Linger:      D(20 * time.Second),
-			ReleaseWait: D(60 * time.Second),
-			ResidualMiB: 900,
-			BusyUtilPct: 20,
-			SwitchDrain: D(10 * time.Minute),
-			Game:        GamePol{Drain: D(15 * time.Second)},
-			Stream:      StreamPo{EncodeGPU: 0, MinFreeMiB: 768, HoldComfy: true, ComfyDrain: D(60 * time.Second)},
+			Restore:       true,
+			Linger:        D(20 * time.Second),
+			ReleaseWait:   D(60 * time.Second),
+			StrictRelease: true,
+			ResidualMiB:   900,
+			BusyUtilPct:   20,
+			SwitchDrain:   D(10 * time.Minute),
+			Game:          GamePol{Drain: D(15 * time.Second)},
+			Stream:        StreamPo{EncodeGPU: 0, MinFreeMiB: 768, HoldComfy: true, ComfyDrain: D(60 * time.Second)},
 		},
 		Detect: Detect{
 			Games:          true,

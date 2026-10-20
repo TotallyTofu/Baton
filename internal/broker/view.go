@@ -67,11 +67,19 @@ type OpView struct {
 
 type EngineView struct {
 	engine.Status
-	Inflight int  `json:"inflight"`
-	Holder   bool `json:"holder"`
-	Restore  bool `json:"restore"`
-	LLM      bool `json:"llm"`
-	HasLog   bool `json:"has_log"`
+	Inflight int          `json:"inflight"`
+	Holder   bool         `json:"holder"`
+	Restore  bool         `json:"restore"`
+	LLM      bool         `json:"llm"`
+	HasLog   bool         `json:"has_log"`
+	Aground  *AgroundView `json:"aground,omitempty"`
+}
+
+// AgroundView is memory an engine kept after its release (strict_release).
+type AgroundView struct {
+	Since    time.Time   `json:"since"`
+	MiB      map[int]int `json:"mib"` // still held per GPU
+	TotalMiB int         `json:"total_mib"`
 }
 
 type GateView struct {
@@ -145,11 +153,19 @@ func (b *Broker) View(eventsSince int64) View {
 	for _, e := range b.engines {
 		name := e.Config().Name
 		s := b.st[name]
-		v.Engines = append(v.Engines, EngineView{
+		row := EngineView{
 			Status: s, Inflight: b.inflight[name], Holder: b.holder == name,
 			Restore: b.restoreTo == name || b.pendingRest == name, LLM: e.IsLLM(),
 			HasLog: fileExists(engine.LogPath(b.cfg.Daemon.StateDir, name)),
-		})
+		}
+		if a := b.aground[name]; a != nil {
+			row.Aground = &AgroundView{Since: a.since, MiB: map[int]int{}}
+			for g, mib := range a.mib {
+				row.Aground.MiB[g] = mib
+				row.Aground.TotalMiB += mib
+			}
+		}
+		v.Engines = append(v.Engines, row)
 		for _, pid := range s.PIDs {
 			tag[pid] = name
 		}

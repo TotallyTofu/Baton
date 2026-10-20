@@ -28,24 +28,25 @@ import (
 
 // Status is what an engine looks like right now.
 type Status struct {
-	Name     string         `json:"name"`
-	Kind     string         `json:"kind"`
-	URL      string         `json:"url"`
-	GPUs     []int          `json:"gpus"`
-	Up       bool           `json:"up"`      // its server answers
-	Loaded   bool           `json:"loaded"`  // it holds a model (or real VRAM)
-	Loading  bool           `json:"loading"` // a load is in progress
-	Model    string         `json:"model,omitempty"`
-	Busy     bool           `json:"busy"`
-	BusyWhy  string         `json:"busy_why,omitempty"`
-	Detail   string         `json:"detail,omitempty"`
-	PIDs     []int          `json:"pids,omitempty"`
-	VRAMMiB  map[int]int    `json:"vram_mib"` // per GPU index
-	RAMMiB   int            `json:"ram_mib"`  // resident system RAM of its processes
-	Util     float64        `json:"util"`
-	Err      string         `json:"error,omitempty"`
-	CanStart bool           `json:"can_start"`
-	Extra    map[string]any `json:"extra,omitempty"`
+	Name      string         `json:"name"`
+	Kind      string         `json:"kind"`
+	URL       string         `json:"url"`
+	GPUs      []int          `json:"gpus"`
+	Up        bool           `json:"up"`      // its server answers
+	Loaded    bool           `json:"loaded"`  // it holds a model (or real VRAM)
+	Loading   bool           `json:"loading"` // a load is in progress
+	Model     string         `json:"model,omitempty"`
+	Busy      bool           `json:"busy"`
+	BusyWhy   string         `json:"busy_why,omitempty"`
+	BusyExact bool           `json:"busy_exact,omitempty"` // Busy is authoritative; don't infer work from GPU load
+	Detail    string         `json:"detail,omitempty"`
+	PIDs      []int          `json:"pids,omitempty"`
+	VRAMMiB   map[int]int    `json:"vram_mib"` // per GPU index
+	RAMMiB    int            `json:"ram_mib"`  // resident system RAM of its processes
+	Util      float64        `json:"util"`
+	Err       string         `json:"error,omitempty"`
+	CanStart  bool           `json:"can_start"`
+	Extra     map[string]any `json:"extra,omitempty"`
 
 	procs []win.Proc // what Release would kill, with start times
 }

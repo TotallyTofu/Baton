@@ -63,6 +63,7 @@ look
 act
   use ENGINE [--model M] [--no-wait]   give an engine the GPUs
   release ENGINE         make an engine give the GPUs back
+  reclaim ENGINE         force-stop an engine that kept its VRAM after a release (aground)
   free                   release every engine
   hold [--reason R] [--for 2h]         keep every engine off the GPUs
   unhold                 end a hold
@@ -136,6 +137,11 @@ func main() {
 			fail(errors.New("usage: baton release ENGINE"))
 		}
 		code = simple(cfg, "/api/engines/"+rest[0]+"/release?wait=1", nil, rest[0]+" released")
+	case "reclaim":
+		if len(rest) != 1 {
+			fail(errors.New("usage: baton reclaim ENGINE"))
+		}
+		code = simple(cfg, "/api/engines/"+rest[0]+"/reclaim?wait=1", nil, rest[0]+" stopped; its memory is free")
 	case "free":
 		code = simple(cfg, "/api/free?wait=1", nil, "all engines released")
 	case "hold":
@@ -618,6 +624,8 @@ func cmdStatus(cfg *config.Config, args []string) int {
 	for _, e := range v.Engines {
 		state := "stopped"
 		switch {
+		case e.Aground != nil:
+			state = "aground"
 		case e.Loading:
 			state = "loading"
 		case e.Holder && (e.Loaded || e.Up):
@@ -644,6 +652,9 @@ func cmdStatus(cfg *config.Config, args []string) int {
 		}
 		if e.Err != "" {
 			note = "error: " + firstLine(e.Err)
+		}
+		if e.Aground != nil {
+			note = fmt.Sprintf("still holds %.1f GiB after release (baton reclaim %s)", float64(e.Aground.TotalMiB)/1024, e.Name)
 		}
 		ram := ""
 		if e.RAMMiB >= 64 {

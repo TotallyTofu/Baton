@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -167,7 +168,12 @@ func (b *Broker) claimLocked() {
 			}
 			gpus := b.allGPUs()
 			if err := b.releaseOne(ctx, v, v.Config().Release, gpus); err != nil {
-				return err
+				// The winner has loaded already: an aground victim is
+				// reported, not a reason to stop.
+				var ag *AgroundError
+				if !errors.As(err, &ag) {
+					return err
+				}
 			}
 			if w.Config().Kind == "comfyui" && v.IsLLM() {
 				b.mu.Lock()

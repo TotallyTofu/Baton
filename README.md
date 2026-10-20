@@ -73,6 +73,17 @@ A game or stream must be gone for 20 s (`linger`) before baton restores the
 LLM, so launchers restarting a game don't bounce it. ComfyUI jobs that waited
 run first; the LLM comes back after they finish.
 
+**Strict release.** After releasing an engine, baton waits up to
+`release_wait` (60 s) for the driver to show its memory free. If it never does
+(a stuck unload, a process that won't die), the engine is marked **aground**:
+baton starts nothing else on those GPUs, since that could run out of memory,
+and says why (the gateway answers `503` with `code: engine_aground`; ComfyUI
+jobs wait). The mark clears by itself once the memory frees. **Force stop** on
+the engine's card, or `baton reclaim ENGINE`, ends its server whatever its
+release mode. Games and holds still release the other engines.
+`strict_release = false` brings back the old behaviour: warn and start the
+next engine anyway.
+
 ## Engines
 
 **TabbyAPI.** Baton starts `start.bat` hidden and stops it by ending its
@@ -84,6 +95,11 @@ to `%LOCALAPPDATA%\baton\logs\tabby.log`:
   request's stats on top (the card shows them too).
 - `baton logs tabby -f` follows it in a terminal.
 - `show_window = true` gives TabbyAPI its own console window instead.
+
+When baton started TabbyAPI, a switch waits for exactly the requests it is
+generating, read from this log, including ones sent to its port directly. If
+you started it yourself (or with `show_window`) there is no log to read, and
+baton goes by its GPU load instead.
 
 **Unsloth Studio.** Studio stays open; baton unloads and reloads its model over
 Studio's API, which needs a key: create one in Studio (Settings → API keys),
@@ -129,7 +145,8 @@ models    each engine's model plus the aliases in `serves` and [[engine.model]]
 
 A model that isn't loaded is started for the request. Streaming requests get
 `: baton: starting tabby, 10s` comments while they wait. During a game or hold
-the gateway answers `503` with `code: gpu_reserved` and `Retry-After: 60`.
+the gateway answers `503` with `code: gpu_reserved` and `Retry-After: 60`; while
+an engine is aground, `503` with `code: engine_aground` and `Retry-After: 30`.
 
 ## Streaming (Apollo, Sunshine, Moonlight, Steam Remote Play)
 
@@ -162,6 +179,7 @@ baton status [--json] | gpus | events [-f]    look
 baton logs ENGINE [-f] [-n N]                 an engine's output
 baton use ENGINE [--model M]                  give an engine the GPUs
 baton release ENGINE | free                   give them back
+baton reclaim ENGINE                          force-stop an engine stuck holding VRAM
 baton hold [--reason R] [--for 2h] | unhold   reserve the GPUs yourself
 baton hook stream-start|stream-end|game-start|game-end [--source S]
 baton key | config | autostart on|off | firewall | version

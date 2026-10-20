@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -180,4 +181,140 @@ func ParseTabbyMetrics(text string) *TabbyMetrics {
 		return t
 	}
 	return nil
+}
+
+// tabbyReqs follows the request lines of TabbyAPI's log to tell which
+// generations are still running. Only what follows baton's last start marker
+// counts: TabbyAPI numbers its requests from #1 again each time it starts.
+type tabbyReqs struct {
+	marker  time.Time            // when baton last started TabbyAPI; zero if not seen
+	running map[string]time.Time // request tag ("12", or "12.1" for one of n choices) -> start
+	done    map[string]bool      // ended: reading its start again must not revive it
+	pending string               // the last record; wrapped lines may still extend it
+	applied bool                 // pending has been applied as it stands
+}
+
+const markerPrefix = "===== baton started "
+
+var (
+	rqLine   = regexp.MustCompile(`^(\d\d):(\d\d):(\d\d)\S*\s+(INFO|WARNING|ERROR):\s+(.*)$`)
+	rqStart  = regexp.MustCompile(`^#(\d+(?:\.\d+)?) [^:]*: [\d,]+ prompt tokens`)
+	rqFinish = regexp.MustCompile(`^#(\d+(?:\.\d+)?) [^:]*: [\d,]+ tokens generated`)
+	// A client that went away (noticed by non-stream requests), a Kobold
+	// abort, or an error sent back to the request. These name the request
+	// without a choice index, so they end all of its choices.
+	rqEnd = regexp.MustCompile(`^(?:Sent to request: )?#(\d+)(?:\.\d+)? .*(?:client disconnected|cancelled|aborted)`)
+)
+
+func (r *tabbyReqs) reset() {
+	r.marker, r.running, r.done = time.Time{}, map[string]time.Time{}, map[string]bool{}
+}
+
+// feed takes the next whole lines of the log.
+func (r *tabbyReqs) feed(text string, now time.Time) {
+	if r.running == nil {
+		r.reset()
+	}
+	text = strings.TrimSuffix(text, "\n")
+	if text == "" {
+		return
+	}
+	for _, l := range strings.Split(text, "\n") {
+		// Records the console wrapped at 80 columns go on in indented lines.
+		if strings.HasPrefix(l, "          ") && r.pending != "" {
+			r.pending += " " + strings.TrimSpace(l)
+			r.applied = false
+			continue
+		}
+		r.flush(now)
+		r.pending, r.applied = l, false
+	}
+	// The last record counts now; if wrapped lines follow it is applied
+	// again, which changes nothing for a start or an end already seen.
+	r.flush(now)
+}
+
+func (r *tabbyReqs) flush(now time.Time) {
+	if !r.applied {
+		r.apply(r.pending, now)
+		r.applied = true
+	}
+}
+
+func (r *tabbyReqs) apply(rec string, now time.Time) {
+	if strings.HasPrefix(rec, markerPrefix) {
+		r.reset()
+		s := strings.TrimSuffix(strings.TrimSpace(rec), "=====")
+		if i := strings.LastIndex(s, " at "); i >= 0 {
+			r.marker, _ = time.Parse(time.RFC3339, strings.TrimSpace(s[i+4:]))
+		}
+		return
+	}
+	m := rqLine.FindStringSubmatch(rec)
+	if m == nil {
+		return
+	}
+	level, msg := m[4], m[5]
+	if level == "INFO" {
+		if s := rqStart.FindStringSubmatch(msg); s != nil {
+			if _, ok := r.running[s[1]]; !ok && !r.done[s[1]] {
+				r.running[s[1]] = logClock(m[1], m[2], m[3], now)
+			}
+			return
+		}
+		if s := rqFinish.FindStringSubmatch(msg); s != nil {
+			r.end(s[1])
+			return
+		}
+	}
+	switch {
+	case strings.HasPrefix(msg, "Immediately terminating all jobs"), strings.HasPrefix(msg, "Model unloaded"):
+		r.endAll()
+	case strings.HasPrefix(msg, "Generation failed; error was contained"):
+		// The failed request is not named; with one in flight it is that one.
+		if len(r.running) == 1 {
+			r.endAll()
+		}
+	case level != "INFO":
+		if s := rqEnd.FindStringSubmatch(msg); s != nil {
+			r.end(s[1])
+			for k := range r.running {
+				if strings.HasPrefix(k, s[1]+".") {
+					r.end(k)
+				}
+			}
+		}
+	}
+}
+
+func (r *tabbyReqs) end(tag string) {
+	delete(r.running, tag)
+	r.done[tag] = true
+}
+
+func (r *tabbyReqs) endAll() {
+	for k := range r.running {
+		r.end(k)
+	}
+}
+
+// expire ends requests that started longer than age ago: their end was
+// missed (TabbyAPI logs none when a stream's client goes away).
+func (r *tabbyReqs) expire(now time.Time, age time.Duration) {
+	for k, at := range r.running {
+		if now.Sub(at) > age {
+			r.end(k)
+		}
+	}
+}
+
+// logClock dates a time of day from the log: the latest such moment not
+// after now.
+func logClock(h, m, s string, now time.Time) time.Time {
+	y, mo, d := now.Date()
+	t := time.Date(y, mo, d, atoi(h), atoi(m), atoi(s), 0, now.Location())
+	if t.After(now.Add(time.Minute)) {
+		t = t.AddDate(0, 0, -1)
+	}
+	return t
 }

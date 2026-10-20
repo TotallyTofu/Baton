@@ -250,8 +250,11 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request) {
 		if aerr != nil {
 			code, retry := "start_failed", 15
 			var h *broker.HeldError
+			var ag *broker.AgroundError
 			if errors.As(aerr, &h) {
 				code, retry = "gpu_reserved", 60
+			} else if errors.As(aerr, &ag) {
+				code, retry = "engine_aground", 30
 			}
 			if errors.Is(aerr, context.Canceled) && r.Context().Err() != nil {
 				return // client went away

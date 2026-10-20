@@ -384,6 +384,7 @@ function renderMem(v) {
 }
 
 function engState(e) {
+  if (e.aground) return ['Aground', 'st-err'];
   if (e.error && !e.up && !e.loading) return ['Error', 'st-err'];
   if (e.loading) return ['Loading', 'st-load'];
   if (e.holder && (e.loaded || e.up)) return ['Holds GPUs', 'st-hold'];
@@ -413,14 +414,27 @@ function renderEngines(v) {
       <div class="sub">${vram}${e.detail ? ' · ' + esc(e.detail) : ''}</div>
       ${bits.length ? `<div class="sub">${bits.join(' · ')}</div>` : ''}
       ${lastReq(e)}
+      ${e.aground ? `<div class="errtxt">${aground(e.aground)}</div>` : ''}
       ${e.error ? `<div class="errtxt">${esc(e.error)}</div>` : ''}
       <div class="actions">
         <button class="primary" ${busyOp || (e.holder && e.loaded) ? 'disabled' : ''} onclick="post('/api/engines/${encodeURIComponent(e.name)}/activate')">${activeLabel}</button>
         <button ${!(e.loaded || e.loading || (e.pids || []).length) ? 'disabled' : ''} onclick="post('/api/engines/${encodeURIComponent(e.name)}/release')">Release</button>
+        ${e.aground ? `<button class="warn" data-n="${esc(e.name)}" onclick="reclaim(this.dataset.n)">Force stop</button>` : ''}
         ${e.has_log || e.kind === 'tabby' ? `<button data-n="${esc(e.name)}" onclick="openLog(this.dataset.n)">Log</button>` : ''}
       </div>
     </div>`;
   }).join('') || '<div class="card empty">No engines configured.</div>';
+}
+
+// Memory an engine kept after its release: nothing else starts on those GPUs
+// until it lets go or is force-stopped.
+function aground(a) {
+  const per = Object.entries(a.mib || {}).map(([g, m]) => `${gib(m)} GiB on GPU ${esc(g)}`).join(', ') || gib(a.total_mib) + ' GiB';
+  return `Still holds ${per} after release (aground ${ago(a.since)}); nothing else starts there until it lets go.`;
+}
+
+function reclaim(name) {
+  if (confirm(`Force stop ${name}? Its server is ended, whatever its release mode, so the memory it kept is freed.`)) post(`/api/engines/${encodeURIComponent(name)}/reclaim`);
 }
 
 // The last request TabbyAPI reported, under its card.

@@ -30,7 +30,22 @@ type tabby struct {
 	logMod  time.Time
 	logSize int64
 	lastReq *TabbyMetrics
+
+	// Requests in flight, read from the log as it grows.
+	rmu       sync.Mutex
+	reqs      tabbyReqs
+	reqOff    int64 // how far the log has been read
+	reqMod    time.Time
+	reqSize   int64
+	idleSince time.Time // since when requests have been "in flight" on an idle GPU
 }
+
+const (
+	tabbyStale     = 30 * time.Minute // a start this old lost its end line
+	tabbyScanMax   = 8 << 20          // how much of a long log to read at first
+	tabbyIdlePct   = 5                // GPU load below this is idle
+	tabbyIdleGrace = 15 * time.Second // how long requests may sit on an idle GPU
+)
 
 func newTabby(c config.Engine, env *Env) *tabby {
 	t := &tabby{base: base{cfg: c, env: env}}
@@ -87,7 +102,118 @@ func (t *tabby) Probe(ctx context.Context, snap *telemetry.Snapshot) Status {
 		}
 		st.Extra["last"] = m
 	}
+	t.trackRequests(&st, time.Now())
 	return st
+}
+
+// trackRequests marks the status busy while TabbyAPI's log shows requests in
+// flight, and exact, so the broker waits for those instead of guessing from
+// GPU load. That needs a log that belongs to the TabbyAPI running now; a
+// TabbyAPI started outside baton keeps the GPU-load guess.
+func (t *tabby) trackRequests(st *Status, now time.Time) {
+	t.rmu.Lock()
+	defer t.rmu.Unlock()
+	if !t.readRequests(LogPath(t.env.StateDir, t.cfg.Name), now) || !st.Up || !t.logTrusted(*st) {
+		t.idleSince = time.Time{}
+		return
+	}
+	t.reqs.expire(now, tabbyStale)
+	// A stream whose client goes away usually ends without a line in the log
+	// (its job is cancelled under TabbyAPI's feet), so requests that sit on
+	// an idle GPU are let go after a while. Without per-process GPU data (no
+	// VRAM seen) only the age limit applies.
+	if len(t.reqs.running) > 0 && maxMiB(st.VRAMMiB) > 0 && st.Util < tabbyIdlePct {
+		if t.idleSince.IsZero() {
+			t.idleSince = now
+		} else if now.Sub(t.idleSince) >= tabbyIdleGrace {
+			t.reqs.endAll()
+		}
+	} else {
+		t.idleSince = time.Time{}
+	}
+	st.BusyExact = true
+	switch n := len(t.reqs.running); n {
+	case 0:
+	case 1:
+		for tag, at := range t.reqs.running {
+			st.Busy, st.BusyWhy = true, fmt.Sprintf("generating #%s (%s)", tag, max(now.Sub(at), 0).Round(time.Second))
+		}
+	default:
+		st.Busy, st.BusyWhy = true, fmt.Sprintf("%d requests in flight", n)
+	}
+}
+
+// readRequests feeds what the log gained since the last look to the
+// tracker. A log that shrank was rotated or truncated: start over.
+func (t *tabby) readRequests(path string, now time.Time) bool {
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.reqs, t.reqOff, t.reqSize, t.reqMod = tabbyReqs{}, 0, 0, time.Time{}
+		return false
+	}
+	if fi.Size() == t.reqSize && fi.ModTime().Equal(t.reqMod) {
+		return true
+	}
+	t.reqSize, t.reqMod = fi.Size(), fi.ModTime()
+	skip := false // drop a partial first line
+	if fi.Size() < t.reqOff || t.reqs.running == nil {
+		t.reqs = tabbyReqs{}
+		t.reqs.reset()
+		t.reqOff = max(fi.Size()-tabbyScanMax, 0)
+		skip = t.reqOff > 0
+	}
+	for t.reqOff < fi.Size() {
+		text, next, _, err := ReadLog(path, t.reqOff)
+		if err != nil {
+			break
+		}
+		if next == t.reqOff {
+			if fi.Size()-t.reqOff < 1<<20 {
+				break // a half-written line: next time
+			}
+			t.reqOff += 1 << 20 // one line longer than a read: skip it
+			skip = true
+			continue
+		}
+		if skip {
+			_, text, _ = strings.Cut(text, "\n")
+			skip = false
+		}
+		t.reqs.feed(text, now)
+		t.reqOff = next
+	}
+	return true
+}
+
+// logTrusted reports whether the log shows the TabbyAPI running now: baton
+// started it with its output going to the log, or (after a baton restart)
+// it started right after baton's last marker.
+func (t *tabby) logTrusted(st Status) bool {
+	if t.cfg.ShowWindow {
+		return false // its output goes to a console
+	}
+	if t.managedRunning() {
+		return true
+	}
+	if t.reqs.marker.IsZero() {
+		return false
+	}
+	var first time.Time
+	for _, p := range st.procs {
+		if at := fileTime(p.Start); !at.IsZero() && (first.IsZero() || at.Before(first)) {
+			first = at
+		}
+	}
+	d := first.Sub(t.reqs.marker)
+	return !first.IsZero() && d > -2*time.Second && d < time.Minute
+}
+
+// fileTime converts a Windows FILETIME (100 ns ticks since 1601).
+func fileTime(ft int64) time.Time {
+	if ft == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, (ft-116444736000000000)*100)
 }
 
 // lastMetrics reads TabbyAPI's summary of its latest request from the log,
