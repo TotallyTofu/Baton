@@ -70,6 +70,15 @@ func Processes() ([]Proc, error) {
 		}
 	}
 	pathCacheMu.Unlock()
+	cmdCacheMu.Lock()
+	for _, m := range []map[int]cmdEntry{cmdCache, dirCache} {
+		for pid := range m {
+			if !seen[pid] {
+				delete(m, pid)
+			}
+		}
+	}
+	cmdCacheMu.Unlock()
 	return out, nil
 }
 
@@ -99,6 +108,108 @@ func identity(pid int) (path string, start int64, ws, priv uint64, ok bool) {
 	pathCache[pid] = pathEntry{start: start, path: path}
 	pathCacheMu.Unlock()
 	return path, start, ws, priv, true
+}
+
+type cmdEntry struct {
+	start int64
+	line  string
+}
+
+var (
+	cmdCacheMu sync.Mutex
+	cmdCache   = map[int]cmdEntry{}
+	dirCache   = map[int]cmdEntry{}
+)
+
+// CommandLine reads a process's command line, which Windows 8.1 and later
+// hand out with the same limited query right as the image path. start is the
+// process's creation time; with it the answer is kept until the PID is reused.
+func CommandLine(pid int, start int64) (string, error) {
+	cmdCacheMu.Lock()
+	if ent, ok := cmdCache[pid]; ok && ent.start == start && start != 0 {
+		cmdCacheMu.Unlock()
+		return ent.line, nil
+	}
+	cmdCacheMu.Unlock()
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(h)
+	// The answer is a UNICODE_STRING followed by the text it points to.
+	buf := make([]byte, 4096)
+	for {
+		var n uint32
+		err = windows.NtQueryInformationProcess(h, windows.ProcessCommandLineInformation, unsafe.Pointer(&buf[0]), uint32(len(buf)), &n)
+		if err == windows.STATUS_INFO_LENGTH_MISMATCH && int(n) > len(buf) && n < 1<<20 {
+			buf = make([]byte, n)
+			continue
+		}
+		break
+	}
+	if err != nil {
+		return "", err
+	}
+	us := (*windows.NTUnicodeString)(unsafe.Pointer(&buf[0]))
+	line := ""
+	if us.Buffer != nil && us.Length > 0 {
+		line = windows.UTF16ToString(unsafe.Slice(us.Buffer, us.Length/2))
+	}
+	cmdCacheMu.Lock()
+	cmdCache[pid] = cmdEntry{start: start, line: line}
+	cmdCacheMu.Unlock()
+	return line, nil
+}
+
+// CurrentDir reads the folder a process runs in ("python app.py" says no
+// more), without a trailing backslash. It lives in the process parameters
+// the PEB points to, so it takes reading the process's memory, which a user
+// may do to their own processes. Kept like CommandLine's answer: the scripts
+// it tells apart don't change folder once started.
+func CurrentDir(pid int, start int64) (string, error) {
+	cmdCacheMu.Lock()
+	if ent, ok := dirCache[pid]; ok && ent.start == start && start != 0 {
+		cmdCacheMu.Unlock()
+		return ent.line, nil
+	}
+	cmdCacheMu.Unlock()
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_VM_READ, false, uint32(pid))
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(h)
+	var pbi windows.PROCESS_BASIC_INFORMATION
+	if err := windows.NtQueryInformationProcess(h, windows.ProcessBasicInformation, unsafe.Pointer(&pbi), uint32(unsafe.Sizeof(pbi)), nil); err != nil {
+		return "", err
+	}
+	var peb windows.PEB
+	if err := readMem(h, uintptr(unsafe.Pointer(pbi.PebBaseAddress)), unsafe.Pointer(&peb), unsafe.Sizeof(peb)); err != nil {
+		return "", err
+	}
+	var params windows.RTL_USER_PROCESS_PARAMETERS
+	if err := readMem(h, uintptr(unsafe.Pointer(peb.ProcessParameters)), unsafe.Pointer(&params), unsafe.Sizeof(params)); err != nil {
+		return "", err
+	}
+	us := params.CurrentDirectory.DosPath
+	dir := ""
+	if us.Buffer != nil && us.Length > 0 {
+		buf := make([]uint16, us.Length/2)
+		if err := readMem(h, uintptr(unsafe.Pointer(us.Buffer)), unsafe.Pointer(&buf[0]), uintptr(us.Length)); err != nil {
+			return "", err
+		}
+		dir = windows.UTF16ToString(buf)
+	}
+	if len(dir) > 3 { // keep C:\ whole
+		dir = strings.TrimSuffix(dir, `\`)
+	}
+	cmdCacheMu.Lock()
+	dirCache[pid] = cmdEntry{start: start, line: dir}
+	cmdCacheMu.Unlock()
+	return dir, nil
+}
+
+func readMem(h windows.Handle, addr uintptr, dst unsafe.Pointer, size uintptr) error {
+	return windows.ReadProcessMemory(h, addr, (*byte)(dst), size, nil)
 }
 
 // Tree is a process table indexed for parent/child walks.

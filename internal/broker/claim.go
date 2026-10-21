@@ -15,7 +15,8 @@ import (
 // TabbyAPI started from its own start.bat, a ComfyUI job queued without the
 // gate node. Baton treats such a load as a claim: the newest load wins, and
 // whatever shares a card with it is released, exactly as if baton had been
-// asked for the switch. During a game or hold nothing may load at all.
+// asked for the switch. During a game or hold nothing may load at all, and
+// while a guest runs no LLM may.
 
 // filetimeToTime converts a Windows FILETIME (100 ns ticks since 1601).
 func filetimeToTime(ft int64) time.Time {
@@ -93,6 +94,23 @@ func (b *Broker) claimLocked() {
 			return
 		}
 		return
+	}
+	if !b.guestSince.IsZero() {
+		for _, e := range b.engines {
+			name := e.Config().Name
+			if !e.IsLLM() || !occupies(b.st[name]) {
+				continue
+			}
+			b.ev.Warnf("claim", name, "%s loaded while %s has the GPUs; releasing it", name, b.guestWhy)
+			eng := e
+			go b.submit("enforce:"+name, "release "+name+" (guest)", false, func(ctx context.Context) error {
+				if err := b.drain(ctx, eng, b.cfg.Policy.Guest.Drain.Duration, false); err != nil {
+					return err
+				}
+				return b.settled(b.releaseOne(ctx, eng, eng.Config().Release, eng.Config().GPUs))
+			})
+			return
+		}
 	}
 
 	// Newest occupant first.

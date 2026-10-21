@@ -13,7 +13,7 @@ const clock = t => new Date(t).toLocaleTimeString([], {hour: '2-digit', minute: 
 const store = {get(k, d) { try { const v = localStorage.getItem('baton.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem('baton.' + k, JSON.stringify(v)); } catch (e) {} }};
 
 const KIND_COLOR = {tabby: 'var(--c-tabby)', unsloth: 'var(--c-unsloth)', comfyui: 'var(--c-comfyui)'};
-const FIXED_COLOR = {game: 'var(--c-game)', stream: 'var(--c-stream)', hold: 'var(--c-hold)', system: 'var(--c-system)', apps: 'var(--c-other)', driver: 'var(--faint)', other: 'var(--c-system)'};
+const FIXED_COLOR = {game: 'var(--c-game)', stream: 'var(--c-stream)', guest: 'var(--c-guest)', hold: 'var(--c-hold)', system: 'var(--c-system)', apps: 'var(--c-other)', driver: 'var(--faint)', other: 'var(--c-system)'};
 const MODES = {normal: ['Normal', 'var(--green)'], stream: ['Streaming', 'var(--c-stream)'], game: ['Game', 'var(--c-game)'], hold: ['Hold', 'var(--c-hold)']};
 let view = null, kinds = {}, models = [], lastModels = 0, evSeq = 0, evList = [];
 
@@ -22,7 +22,7 @@ function colorOf(key) {
   return KIND_COLOR[key] || FIXED_COLOR[key] || 'var(--c-other)';
 }
 function labelOf(key) {
-  return {apps: 'other apps', driver: 'driver / unattributed', system: 'Windows', other: 'everything else'}[key] || key;
+  return {apps: 'other apps', driver: 'driver / unattributed', system: 'Windows', other: 'everything else', guest: 'guests'}[key] || key;
 }
 
 async function post(path, body) {
@@ -98,6 +98,7 @@ function renderHeader(v) {
   $('#modeName').textContent = name;
   let why = v.mode_why ? v.mode_why : (v.holder ? v.holder + ' holds the GPUs' : 'no engine holds the GPUs');
   if (v.mode !== 'normal') why += ' · ' + ago(v.mode_since);
+  if (v.guest) why += ' · guest ' + v.guest.why + ' has the GPUs';
   if (v.restore_to) why += ' · restores ' + v.restore_to + ' after';
   $('#modeWhy').textContent = why;
   $('#modeWhy').title = why;
@@ -125,6 +126,7 @@ function renderAlerts(v) {
     out.push(`<div class="alert err"><span class="tag">AGROUND</span><span class="msg">${aground(e.name, e.aground)}</span><span class="actions"><button class="warn" data-n="${esc(e.name)}" onclick="reclaim(this.dataset.n)">Force stop</button></span><span class="when">since ${clock(e.aground.since)}</span></div>`);
   }
   if (v.mode === 'game' || v.mode === 'hold') out.push(`<div class="alert warn"><span class="tag">${v.mode.toUpperCase()}</span><span class="msg">${esc(v.mode_why || '')}: every engine is off the cards${v.restore_to ? '; ' + esc(v.restore_to) + ' comes back after' : ''}.</span><span class="when">since ${clock(v.mode_since)}</span></div>`);
+  else if (v.guest) out.push(`<div class="alert warn"><span class="tag">GUEST</span><span class="msg"><b>${esc(v.guest.why)}</b> is using the cards: the LLMs stay off until it is done${v.restore_to ? '; ' + esc(v.restore_to) + ' comes back after' : ''}.</span><span class="when">since ${clock(v.guest.since)}</span></div>`);
   if (v.error) out.push(`<div class="alert err"><span class="tag">ERROR</span><span class="msg">${esc(v.error)}</span></div>`);
   const html = out.join('');
   if ($('#alerts').innerHTML !== html) $('#alerts').innerHTML = html;

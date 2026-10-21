@@ -3,9 +3,76 @@
 package win
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
+
+// The test's own command line names the test binary and its flags.
+func TestCommandLine(t *testing.T) {
+	ps, err := Processes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var self Proc
+	for _, p := range ps {
+		if p.PID == os.Getpid() {
+			self = p
+		}
+	}
+	line, err := CommandLine(self.PID, self.Start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(line, filepath.Base(os.Args[0])) || !strings.Contains(line, "-test.") {
+		t.Fatalf("command line = %q", line)
+	}
+	if again, _ := CommandLine(self.PID, self.Start); again != line {
+		t.Fatalf("cached command line = %q, want %q", again, line)
+	}
+}
+
+// The folder of this process and of a child started somewhere else.
+func TestCurrentDir(t *testing.T) {
+	wd, _ := os.Getwd()
+	if got, err := CurrentDir(os.Getpid(), 0); err != nil || !strings.EqualFold(got, wd) {
+		t.Fatalf("own folder = %q, %v; want %q", got, err, wd)
+	}
+	dir := t.TempDir()
+	cmd := exec.Command("cmd.exe", "/c", "ping -n 30 127.0.0.1 >nul")
+	cmd.Dir = dir
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+	got, err := CurrentDir(cmd.Process.Pid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// TempDir may come back in 8.3 form; compare what Windows resolves both to.
+	if long(t, got) != long(t, dir) {
+		t.Fatalf("child folder = %q, want %q", got, dir)
+	}
+}
+
+func long(t *testing.T, p string) string {
+	t.Helper()
+	in, err := windows.UTF16PtrFromString(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetLongPathName(in, &buf[0], uint32(len(buf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.ToLower(windows.UTF16ToString(buf[:n]))
+}
 
 func TestProbeLive(t *testing.T) {
 	gs, err := GPUs()

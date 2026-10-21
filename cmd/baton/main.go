@@ -163,6 +163,22 @@ func main() {
 		for _, e := range cfg.Engines {
 			fmt.Printf("engine %-10s %-8s %s gpus=%v release=%s game_release=%s\n", e.Name, e.Kind, e.URL, e.GPUs, e.Release, e.GameRelease)
 		}
+		for _, c := range cfg.Claims {
+			action := c.Action
+			if action == "" {
+				action = "game"
+			}
+			line := fmt.Sprintf("claim  %-10s %-8s", c.Name, action)
+			if len(c.Exe) > 0 {
+				line += fmt.Sprintf(" exe=%v", c.Exe)
+			}
+			for _, kv := range [][2]string{{"path", c.Path}, {"not", c.Not}, {"args", c.Args}, {"dir", c.Dir}} {
+				if kv[1] != "" {
+					line += " " + kv[0] + "='" + kv[1] + "'"
+				}
+			}
+			fmt.Println(line)
+		}
 		fmt.Println("config ok")
 	case "autostart":
 		code = cmdAutostart(rest, path)
@@ -609,6 +625,9 @@ func cmdStatus(cfg *config.Config, args []string) int {
 		line += ": " + v.ModeWhy
 	} else if v.Holder != "" {
 		line += ": " + v.Holder + " holds the GPUs"
+	}
+	if v.Guest != nil {
+		line += "; guest " + v.Guest.Why + " has the GPUs, the LLMs wait"
 	}
 	if v.RestoreTo != "" {
 		line += " (restores " + v.RestoreTo + " after)"

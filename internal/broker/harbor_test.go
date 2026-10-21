@@ -7,6 +7,7 @@ import (
 
 	"baton/internal/detect"
 	"baton/internal/harbor"
+	"baton/internal/telemetry"
 )
 
 func TestHistoryCountsHandoffsAndVoyages(t *testing.T) {
@@ -83,6 +84,28 @@ func TestHistoryTimelineAndBoard(t *testing.T) {
 	rv := r.b.Requests(24 * time.Hour)
 	if len(rv.Pools) != 2 || rv.Sources["tabby"] == "" {
 		t.Fatalf("requests view: pools %+v sources %v", rv.Pools, rv.Sources)
+	}
+}
+
+// A venv's python.exe and the interpreter it starts are one guest on the
+// board, holding what the interpreter allocated.
+func TestBoardGuestOneRow(t *testing.T) {
+	r := newRig(t)
+	r.b.mu.Lock()
+	r.b.hits = []detect.Hit{
+		{Kind: "guest", Rule: "qwen3-tts", PID: 10, Exe: "python.exe"},
+		{Kind: "guest", Rule: "qwen3-tts", PID: 11, Exe: "python.exe"},
+	}
+	r.b.snap = &telemetry.Snapshot{ByPID: map[int]map[int]telemetry.Use{11: {0: {Dedicated: 6 << 30}}}}
+	r.b.mu.Unlock()
+	var rows []Departure
+	for _, d := range r.b.Harbor(time.Hour).Board {
+		if d.Kind == "guest" {
+			rows = append(rows, d)
+		}
+	}
+	if len(rows) != 1 || rows[0].Vessel != "qwen3-tts" || rows[0].HoldMiB != 6144 || len(rows[0].GPUs) != 1 || rows[0].GPUs[0] != 0 {
+		t.Fatalf("guest rows: %+v", rows)
 	}
 }
 

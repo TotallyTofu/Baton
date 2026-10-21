@@ -21,6 +21,9 @@ in the background with a tray icon and a web dashboard.
 - **Streams stay smooth.** While Apollo/Sunshine or Steam Remote Play is
   streaming (an NVENC session), ComfyUI is freed and new jobs wait; the LLM
   stays loaded while the encoding card keeps enough VRAM free.
+- **Guests get room.** An app you name as a guest, such as
+  [DigUp](https://github.com/ARahim3/DigUp)'s file indexer, gets the cards
+  from the LLMs while it runs, and the LLM comes back when it is done.
 - **Sees every process on every card.** NVIDIA's driver reports no
   per-process memory on Windows (WDDM), so baton reads Windows' own GPU
   counters (what Task Manager uses) and names every process holding VRAM.
@@ -74,20 +77,21 @@ gateway); where nothing was measured the page says so instead of guessing.
 - **The ticket counter**: collisions avoided (times a card was cleared and the
   driver showed it free before the next user got it), VRAM released, switches,
   drains, releases that ran aground, outside loads settled, refused switches,
-  games and streams, ComfyUI jobs held at the gate. Under it the last hour of
-  requests: median decode speed and time to first token, p95 request time,
-  requests per minute, what is waiting now, cache and draft acceptance rates.
+  games, streams and guests, ComfyUI jobs held at the gate. Under it the last
+  hour of requests: median decode speed and time to first token, p95 request
+  time, requests per minute, what is waiting now, cache and draft acceptance
+  rates.
 - **The tide**: each card's memory over the last hour, 6 hours or day,
-  stacked by who held it (each engine, a game, a stream, other apps, Windows,
-  the driver), and system RAM with each engine's share.
-- **Model timeline**: which model, game, stream or hold had the cards, when.
+  stacked by who held it (each engine, a game, a stream, a guest, other
+  apps, Windows, the driver), and system RAM with each engine's share.
+- **Model timeline**: which model, game, stream, guest or hold had the cards, when.
 - **Departures**: the change under way and the queue with their ticket
   numbers, everything on the cards (docked, moored, boarding, aground), and the
   recent voyages with how long each took and how much memory it freed.
 - **Harbor log** (filter by kind or text), **the machines** (each card: memory by
   holder, load, temperature, power, the processes on it), **memory**
-  (RAM, commit, cache), games and streams, and **stowaways**: processes
-  holding real VRAM that belong to no engine, game or stream.
+  (RAM, commit, cache), games, streams and guests, and **stowaways**:
+  processes holding real VRAM that belong to no engine, game, stream or guest.
 
 **Engines & requests**:
 
@@ -120,6 +124,10 @@ across restarts; the tide starts over.
 A game or stream must be gone for 20 s (`linger`) before baton restores the
 LLM, so launchers restarting a game don't bounce it. ComfyUI jobs that waited
 run first; the LLM comes back after they finish.
+
+A [guest](#guests) is not a mode: it runs beside any of them. While one
+runs, the LLM engines stay off the cards in every mode, and the LLM comes
+back once the guest and any game or hold are gone.
 
 **Strict release.** After releasing an engine, baton waits up to
 `release_wait` (60 s) for the driver to show its memory free. If it never does
@@ -203,6 +211,55 @@ browser), or paste a path. Changes apply at once and are saved in `games.json`
 next to `baton.toml`. Regex rules for anything unusual go in `baton.toml` as
 `[[claim]]`.
 
+## Guests
+
+Some apps need the cards for a while but can't wait their turn, like
+[DigUp](https://github.com/ARahim3/DigUp), which indexes your files with
+EmbeddingGemma 2 on llama.cpp's Vulkan backend. It spreads over every card
+(about 2.2 GB with its vision part) and doesn't fit beside a big LLM. Name it
+as a guest in `baton.toml`:
+
+```toml
+[[claim]]
+name = "digup"
+exe = ["digup.exe"]
+args = '\bindex-service\b'   # the indexer; DigUp's search runs as the same exe
+action = "guest"
+```
+
+When the guest starts:
+
+- The loaded LLM (TabbyAPI or Unsloth) finishes its request (up to
+  `[policy.guest] drain`, 60 s), saves its disk KV cache, and is released.
+- No LLM may load while it runs: the gateway answers `503` with
+  `code: gpu_reserved`, and an LLM started by hand is released again.
+- ComfyUI stays: it loads models per job and fits them into what is free.
+  Games and streams work as usual.
+- When the guest has been gone for `linger` (20 s), the LLM comes back, or
+  once a game or hold that is also running ends.
+
+Baton reacts to the process, not the clock: DigUp's *Index only at set hours*
+decides when its indexer runs. `args` is a regex on the command line, which
+baton reads only for processes whose `exe` or `path` already matched.
+
+A Python app is harder: it runs as `python.exe`, and `python app.py` names
+no folder. `dir` is a regex on the folder the process runs in, read the same
+way. Qwen3-TTS (6-7 GB on one card) as a guest while its studio or
+audiobook converter is open:
+
+```toml
+[[claim]]
+name = "qwen3-tts"
+exe = ["python*.exe"]
+dir = '(?i)\\(qwen3-TTS-Studio|Qwen3-Audiobook-Converter)$'
+args = '\b(qwen_tts_ui|app|audiobook_converter)\.py\b'   # not tests or pip runs there
+action = "guest"
+```
+
+A venv's `python.exe` starts the real interpreter as a child; both match and
+show as one guest. The LLM is released when the app starts, before it loads
+its model, and stays off until the app closes.
+
 ## Gateway
 
 Point OpenAI-compatible clients (OpenWebUI, Hermes, scripts) at:
@@ -214,8 +271,9 @@ models    each engine's model plus the aliases in `serves` and [[engine.model]]
 ```
 
 A model that isn't loaded is started for the request. Streaming requests get
-`: baton: starting tabby, 10s` comments while they wait. During a game or hold
-the gateway answers `503` with `code: gpu_reserved` and `Retry-After: 60`; while
+`: baton: starting tabby, 10s` comments while they wait. During a game or hold,
+or while a guest runs, the gateway answers `503` with `code: gpu_reserved` and
+`Retry-After: 60`; while
 an engine is aground, `503` with `code: engine_aground` and `Retry-After: 30`.
 
 ## Streaming (Apollo, Sunshine, Moonlight, Steam Remote Play)

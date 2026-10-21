@@ -1,7 +1,7 @@
 // Package broker decides who holds the GPUs. Engines take turns: before one
 // starts, every engine sharing a card with it finishes its work, gives the
 // memory back, and the driver is checked to show it free. Games and streams
-// override the engines.
+// override the engines, and the LLMs make room for guests.
 package broker
 
 import (
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -32,6 +33,11 @@ const (
 	Stream Mode = "stream" // a stream is live: ComfyUI held, LLM kept while VRAM allows
 	Game   Mode = "game"   // a game runs: every engine is off the cards
 	Hold   Mode = "hold"   // you asked for the cards (baton hold)
+
+	// Guest is not a mode the cards are in but why an LLM may not take them:
+	// a guest (DigUp's indexer) runs beside whatever the mode is, and the
+	// LLMs stay off until it is done.
+	Guest Mode = "guest"
 )
 
 // HeldError says why an engine may not take the cards right now.
@@ -177,6 +183,9 @@ type Broker struct {
 	hits         []detect.Hit
 	lastGame     time.Time
 	lastStream   time.Time
+	lastGuest    time.Time
+	guestSince   time.Time // when a guest got the cards from the LLMs; zero = no guest
+	guestWhy     string
 	manual       *manualHold
 	hooks        map[string]hookSig
 	holder       string
@@ -438,6 +447,15 @@ func (b *Broker) tick(ctx context.Context, first bool) {
 	} else {
 		b.modeWhy = why
 	}
+	guest, guestWhy := b.guestLocked(now)
+	wasGuest := !b.guestSince.IsZero()
+	switch {
+	case guest && !wasGuest:
+		b.guestSince = now
+	case !guest:
+		b.guestSince = time.Time{}
+	}
+	b.guestWhy = guestWhy
 	b.recordLocked(now)
 	rec := b.rec
 	b.mu.Unlock()
@@ -445,9 +463,12 @@ func (b *Broker) tick(ctx context.Context, first bool) {
 
 	if want != from {
 		b.transition(from, want, why)
-	} else if first && want == Normal && b.pendingRestore() {
-		// A game or stream ended while baton was not running.
+	} else if first && want == Normal && !guest && b.pendingRestore() {
+		// A game, stream or guest ended while baton was not running.
 		b.transition(Game, Normal, "")
+	}
+	if guest != wasGuest {
+		b.guestTransition(guest, guestWhy)
 	}
 	b.reconcile(now)
 }
@@ -547,9 +568,10 @@ func (b *Broker) desiredLocked(now time.Time) (Mode, string) {
 	var games, streams []detect.Hit
 	nvenc := false
 	for _, h := range b.hits {
-		if h.Kind == "game" {
+		switch h.Kind {
+		case "game":
 			games = append(games, h)
-		} else {
+		case "stream":
 			streams = append(streams, h)
 			if h.Rule == "nvenc" {
 				nvenc = true
@@ -584,6 +606,82 @@ func (b *Broker) desiredLocked(now time.Time) (Mode, string) {
 		return Stream, b.modeWhy
 	}
 	return Normal, ""
+}
+
+// guestLocked reports whether a guest has the cards: one runs now, or one
+// left less than linger ago (DigUp's indexer quits a minute after its work and
+// starts again when a file lands, so the LLMs don't bounce between runs).
+func (b *Broker) guestLocked(now time.Time) (bool, string) {
+	// Named by their claims: "digup", not the exe they run as.
+	var names []string
+	for _, h := range b.hits {
+		if h.Kind == "guest" && !slices.Contains(names, h.Rule) {
+			names = append(names, h.Rule)
+		}
+	}
+	if len(names) > 0 {
+		b.lastGuest = now
+		return true, strings.Join(names, ", ")
+	}
+	if !b.guestSince.IsZero() && now.Sub(b.lastGuest) < b.cfg.Policy.Linger.Duration {
+		return true, b.guestWhy
+	}
+	return false, ""
+}
+
+// guestTransition makes room for a guest that arrived, or brings back the
+// LLM it pushed out once it has gone. A game or hold keeps the LLM away
+// whatever a guest does; the LLM comes back when that ends.
+func (b *Broker) guestTransition(on bool, why string) {
+	if on {
+		b.ev.Infof("guest", "", "GUEST: %s needs the GPUs; the LLMs make room until it is done", why)
+		b.count(func(c *harbor.Counters) { c.Yields++ })
+		b.submit("guest", "make room for "+why, false, func(ctx context.Context) error {
+			return b.makeRoom(ctx)
+		})
+		return
+	}
+	b.mu.Lock()
+	mode := b.mode
+	b.mu.Unlock()
+	b.ev.Infof("guest", "", "guest gone; the LLMs may take the GPUs again")
+	if held(mode) {
+		return
+	}
+	b.submit("guest-restore", "restore after guest", false, func(ctx context.Context) error {
+		return b.restore(ctx, mode == Stream)
+	})
+}
+
+// makeRoom releases every LLM on the cards for a guest. ComfyUI stays: it
+// loads per job and fits its work into the memory that is free.
+func (b *Broker) makeRoom(ctx context.Context) error {
+	var firstErr error
+	for _, e := range b.engines {
+		if !e.IsLLM() {
+			continue
+		}
+		gpus := e.Config().GPUs
+		s := b.fresh(ctx, e)
+		if !b.holds(s, gpus) {
+			continue
+		}
+		if s.Loaded {
+			b.mu.Lock()
+			if b.restoreTo == "" || b.restoreTo == e.Config().Name {
+				b.restoreTo = e.Config().Name
+				b.saveLocked()
+			}
+			b.mu.Unlock()
+		}
+		if err := b.drain(ctx, e, b.cfg.Policy.Guest.Drain.Duration, false); err != nil {
+			return err
+		}
+		if err := b.releaseOne(ctx, e, e.Config().Release, gpus); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func held(m Mode) bool { return m == Game || m == Hold }
@@ -998,11 +1096,21 @@ func (b *Broker) enterStream(ctx context.Context) error {
 	return nil
 }
 
-// restore brings back the LLM a game or stream pushed out. During a stream
-// only LLMs come back; ComfyUI stays held.
+// restore brings back the LLM a game, stream or guest pushed out. During a
+// stream only LLMs come back; ComfyUI stays held. While a game, a hold or a
+// guest still has the cards the LLM keeps waiting for it.
 func (b *Broker) restore(ctx context.Context, streaming bool) error {
 	b.mu.Lock()
 	name := b.restoreTo
+	if name != "" && (held(b.mode) || !b.guestSince.IsZero()) {
+		why := b.guestWhy
+		if held(b.mode) {
+			why = b.modeWhy
+		}
+		b.mu.Unlock()
+		b.ev.Infof("restore", name, "%s comes back once %s is done", name, why)
+		return nil
+	}
 	b.headroomDone = map[string]bool{}
 	b.lowFree = 0
 	waiters := len(b.gateWait)
@@ -1092,7 +1200,7 @@ func (b *Broker) reconcile(now time.Time) {
 		b.claimLocked()
 	}
 
-	if b.mode != Normal || busyOp || len(b.gateRun) > 0 || len(b.gateWait) > 0 || b.comfyIdle.IsZero() {
+	if b.mode != Normal || !b.guestSince.IsZero() || busyOp || len(b.gateRun) > 0 || len(b.gateWait) > 0 || b.comfyIdle.IsZero() {
 		return
 	}
 	idle := now.Sub(b.comfyIdle)
@@ -1143,7 +1251,19 @@ func (b *Broker) heldFor(target engine.Engine) *HeldError {
 	if b.mode == Stream && target.Config().Kind == "comfyui" && b.cfg.Policy.Stream.HoldComfy {
 		return &HeldError{b.mode, "ComfyUI waits while streaming (" + b.modeWhy + ")"}
 	}
+	if target.IsLLM() && !b.guestSince.IsZero() {
+		return &HeldError{Guest, b.guestWhy + " is using them; the LLMs come back when it is done"}
+	}
 	return nil
+}
+
+// Held says why the engine called name may not take the cards now, or nil.
+func (b *Broker) Held(name string) *HeldError {
+	e := b.byName[name]
+	if e == nil {
+		return nil
+	}
+	return b.heldFor(e)
 }
 
 func (b *Broker) doActivate(ctx context.Context, target engine.Engine, model, why string) error {
@@ -1257,7 +1377,7 @@ func (b *Broker) Ready(name string) bool {
 	}
 	s := b.st[name]
 	e := b.byName[name]
-	if e == nil || !s.Up || (e.IsLLM() && !s.Loaded) {
+	if e == nil || !s.Up || (e.IsLLM() && (!s.Loaded || !b.guestSince.IsZero())) {
 		return false
 	}
 	for _, o := range b.engines {

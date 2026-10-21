@@ -135,6 +135,9 @@ func statusLine(v broker.View) string {
 	case broker.Stream:
 		return "Streaming: " + v.ModeWhy
 	}
+	if v.Guest != nil {
+		return "Guest: " + v.Guest.Why + " (the LLMs wait)"
+	}
 	if v.Op != nil {
 		if v.Op.Stage != "" {
 			return v.Op.Stage

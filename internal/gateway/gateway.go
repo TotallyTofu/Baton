@@ -226,7 +226,7 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request) {
 	out.f, _ = w.(http.Flusher)
 
 	if !g.b.Ready(name) {
-		if h := g.heldNow(eng.Config().Name); h != nil {
+		if h := g.b.Held(name); h != nil {
 			jsonErr(w, http.StatusServiceUnavailable, "gpu_reserved", h.Error(), 60)
 			return
 		}
@@ -453,12 +453,4 @@ func lastObject(b []byte, key string, v any) bool {
 		}
 	}
 	return false
-}
-
-func (g *Gateway) heldNow(name string) *broker.HeldError {
-	v := g.b.View(1 << 62)
-	if v.Mode == broker.Game || v.Mode == broker.Hold {
-		return &broker.HeldError{Mode: v.Mode, Why: v.ModeWhy}
-	}
-	return nil
 }

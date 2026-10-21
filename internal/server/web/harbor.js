@@ -34,7 +34,7 @@ const TILES = [
   ['aground', 'Aground caught', c => c.aground, '', 'releases whose memory stayed, caught before anything else started there'],
   ['claims', 'Outside loads', c => c.claims, '', 'loads outside baton settled by releasing whatever shared the card'],
   ['refused', 'Refused', c => c.refused, '', 'switches turned down: cards reserved, or an engine aground'],
-  ['yields', 'Games & streams', c => c.yields, '', 'games, holds and streams the cards were cleared for'],
+  ['yields', 'Games & streams', c => c.yields, '', 'games, holds, streams and guests the cards were cleared for'],
   ['gate_held', 'ComfyUI held', c => c.gate_held, '', 'ComfyUI jobs that waited at the gate for the cards'],
 ];
 const KPI_DEF = {
@@ -81,7 +81,7 @@ function renderCounter(h) {
 }
 
 // --- the tide ---
-const TIDE_ORDER = ['game', 'stream', 'apps', 'system', 'other', 'driver'];
+const TIDE_ORDER = ['game', 'stream', 'guest', 'apps', 'system', 'other', 'driver'];
 function tideOrder(keys) {
   const eng = Object.keys(kinds).filter(k => keys.includes(k));
   return eng.concat(TIDE_ORDER.filter(k => keys.includes(k)), keys.filter(k => !eng.includes(k) && !TIDE_ORDER.includes(k)));
@@ -173,7 +173,7 @@ function renderEvents(v, force) {
 }
 
 // --- berths: the cards ---
-const WORD = {system: 'SYSTEM', game: 'GAME', stream: 'STREAM'};
+const WORD = {system: 'SYSTEM', game: 'GAME', stream: 'STREAM', guest: 'GUEST'};
 function holderWord(h) {
   if (kinds[h.tag]) {
     const e = (view.engines || []).find(x => x.name === h.tag);
@@ -199,7 +199,8 @@ function renderGPUs(v) {
     if (un > 64) segs += `<span class="hatch" title="driver / unattributed: ${gib(un)} GiB" style="width:${un / total * 100}%"></span>`;
     const enc = (g.encoders || []).length ? `<span class="tag-chip enc">NVENC ×${g.encoders.length}</span>` : '';
     const holder = (v.engines || []).find(e => e.holder && (e.vram_mib || {})[g.index] > 0);
-    const state = v.mode === 'game' || v.mode === 'hold' ? [v.mode.toUpperCase(), 'var(--c-hold)'] : holder ? ['HELD · ' + holder.name.toUpperCase(), colorOf(holder.name)] : used < 1024 ? ['FREE', 'var(--green)'] : ['IN USE', 'var(--muted)'];
+    const guest = v.guest && (g.holders || []).some(h => h.tag === 'guest');
+    const state = v.mode === 'game' || v.mode === 'hold' ? [v.mode.toUpperCase(), 'var(--c-hold)'] : holder ? ['HELD · ' + holder.name.toUpperCase(), colorOf(holder.name)] : guest ? ['GUEST · ' + v.guest.why.toUpperCase(), colorOf('guest')] : used < 1024 ? ['FREE', 'var(--green)'] : ['IN USE', 'var(--muted)'];
     const temp = g.temp_c >= 83 ? 'crit' : g.temp_c >= 75 ? 'hot' : '';
     const holders = (g.holders || []).slice(0, 7).map(h => {
       const [w, c] = holderWord(h);
@@ -254,7 +255,7 @@ function renderMem(v) {
 // --- games & streams ---
 function renderHits(v) {
   const hits = v.hits || [];
-  let html = hits.map(h => `<div class="hit"><span class="tag-chip" style="color:${colorOf(h.kind)};border-color:currentColor">${esc(h.kind.toUpperCase())}</span><b>${esc(h.kind === 'game' ? gameTitle(h) : h.exe)}</b><span class="s">${esc(h.match ? h.rule + ' · ' + h.match : h.rule)}${h.pid ? ' · pid ' + h.pid : ''}</span></div>`).join('');
+  let html = hits.map(h => `<div class="hit"><span class="tag-chip" style="color:${colorOf(h.kind)};border-color:currentColor">${esc(h.kind.toUpperCase())}</span><b>${esc(h.kind === 'game' ? gameTitle(h) : h.exe)}</b><span class="s">${esc(h.match ? h.rule + ' · ' + h.match : h.kind === 'guest' ? h.rule + ' · the LLMs wait' : h.rule)}${h.pid ? ' · pid ' + h.pid : ''}</span></div>`).join('');
   if (v.hold) html = `<div class="hit"><span class="tag-chip" style="color:var(--c-hold);border-color:currentColor">HOLD</span><b>${esc(v.hold.reason)}</b><span class="s">${v.hold.until && !v.hold.until.startsWith('0001') ? 'until ' + new Date(v.hold.until).toLocaleTimeString() : 'until released'}</span></div>` + html;
   html = (html || `<div class="empty-note">No game or stream detected. Games free both GPUs; a stream holds ComfyUI and keeps the LLM while GPU ${esc(v.policy.stream_encode_gpu)} has ${esc(v.policy.stream_min_free_mib)} MiB free.</div>`)
     + '<div style="margin-top:12px"><button class="linkbtn" onclick="openGames()">Manage games →</button></div>';
@@ -268,7 +269,7 @@ function renderStow(v) {
   for (const g of v.gpus || []) for (const h of g.holders || []) if (!h.tag && h.mib >= 128) list.push({...h, gpu: g.index});
   list.sort((a, b) => b.mib - a.mib);
   const html = list.map(s => `<div class="stow"><div class="t"><b>${esc(s.name)}</b><span>pid ${s.pid}</span></div><div class="s">${gib(s.mib)} GiB on gpu${s.gpu}${s.util >= 1 ? ` · ${Math.round(s.util)}% load` : ''}</div></div>`).join('')
-    || '<div class="empty-note">No stowaways: every process holding real memory on the cards belongs to an engine, a game, a stream or Windows.</div>';
+    || '<div class="empty-note">No stowaways: every process holding real memory on the cards belongs to an engine, a game, a stream, a guest or Windows.</div>';
   if ($('#stow').innerHTML !== html) $('#stow').innerHTML = html;
   $('#stowMeta').textContent = list.length ? `${list.length} on the cards` : 'none';
 }

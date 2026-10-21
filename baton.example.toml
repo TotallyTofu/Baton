@@ -41,6 +41,9 @@ min_free_mib = 768          # keep the LLM loaded during a stream only while tha
 hold_comfyui = true         # free ComfyUI and hold new jobs while streaming (needs the gate node to hold)
 comfyui_drain = "60s"       # a running ComfyUI job may finish this long, then it is interrupted
 
+[policy.guest]
+drain = "60s"               # an LLM may finish its request this long before it makes room for a guest (see [[claim]] below)
+
 [detect]
 games = true                # Steam, Epic, GOG, Xbox, EA, Ubisoft libraries and common emulators
 # NVENC sessions owned by these mean "streaming" (Apollo/Sunshine, Steam Remote Play)
@@ -53,7 +56,29 @@ ignore_exe = []
 # [[claim]]
 # name = "my-emulator-frontend"
 # exe = ["SomeFrontend.exe"]
-# action = "game"           # or "stream"
+# action = "game"           # or "stream", or "guest" (below)
+#
+# A guest is an app that needs the cards for a while and can't take turns
+# itself, such as DigUp's file indexer (EmbeddingGemma on llama.cpp/Vulkan).
+# While it runs, the LLM engines are released and wait (the gateway answers
+# 503); the one that was loaded comes back when it is done. ComfyUI, games
+# and streams carry on. args (a regex on the command line) tells the indexer
+# from DigUp's search, which runs as the same exe.
+# [[claim]]
+# name = "digup"
+# exe = ["digup.exe"]
+# args = '\bindex-service\b'
+# action = "guest"
+#
+# A Python app started as "python app.py" names no folder on its command
+# line: dir (a regex on the folder it runs in) does. Qwen3-TTS, for one,
+# needs 6-7 GB on a card:
+# [[claim]]
+# name = "qwen3-tts"
+# exe = ["python*.exe"]
+# dir = '(?i)\\Qwen3-Audiobook-Converter$'
+# args = '\bapp\.py\b'
+# action = "guest"
 
 # --- engines: keep the ones you use, delete the rest ---
 

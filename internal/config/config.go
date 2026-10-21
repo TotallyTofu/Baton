@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -67,11 +68,16 @@ type Policy struct {
 	SwitchDrain   Duration `toml:"switch_drain"`   // how long a switch waits for the holder's work to finish
 	Game          GamePol  `toml:"game"`
 	Stream        StreamPo `toml:"stream"`
+	Guest         GuestPol `toml:"guest"`
 	ComfyIdleRet  Duration `toml:"comfy_return_after"` // after ComfyUI idles this long, give the GPU back to the engine it took it from (0 = never)
 }
 
 type GamePol struct {
 	Drain Duration `toml:"drain"` // how long a running job may finish before a game takes the GPUs anyway
+}
+
+type GuestPol struct {
+	Drain Duration `toml:"drain"` // how long an LLM may finish its request before it makes room for a guest
 }
 
 type StreamPo struct {
@@ -92,14 +98,17 @@ type Detect struct {
 	IgnoreExe      []string `toml:"ignore_exe"`      // never treat these as games
 }
 
-// Claim is a user rule that turns a running process into a game (hold) or a
-// stream.
+// Claim is a user rule that turns a running process into a game (hold), a
+// stream, or a guest: an app such as DigUp's indexer that the LLMs make room
+// for while it runs.
 type Claim struct {
 	Name   string   `toml:"name"`
 	Exe    []string `toml:"exe"`    // file names, case-insensitive, globs allowed
 	Path   string   `toml:"path"`   // regex on the full image path
 	Not    string   `toml:"not"`    // regex on the full image path that excludes
-	Action string   `toml:"action"` // "game" (default) or "stream"
+	Args   string   `toml:"args"`   // regex on the command line, for helpers that share one exe
+	Dir    string   `toml:"dir"`    // regex on the folder it runs in, for scripts started as "python app.py"
+	Action string   `toml:"action"` // "game" (default), "stream" or "guest"
 }
 
 type Model struct {
@@ -160,6 +169,7 @@ func Default() *Config {
 			SwitchDrain:   D(10 * time.Minute),
 			Game:          GamePol{Drain: D(15 * time.Second)},
 			Stream:        StreamPo{EncodeGPU: 0, MinFreeMiB: 768, HoldComfy: true, ComfyDrain: D(60 * time.Second)},
+			Guest:         GuestPol{Drain: D(60 * time.Second)},
 		},
 		Detect: Detect{
 			Games:          true,
@@ -294,8 +304,16 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Sprintf("gateway.default_engine %q is not an engine", c.Gateway.DefaultEngine))
 	}
 	for _, cl := range c.Claims {
-		if cl.Action != "" && cl.Action != "game" && cl.Action != "stream" {
-			errs = append(errs, fmt.Sprintf("claim %q: action must be game or stream", cl.Name))
+		if cl.Action != "" && cl.Action != "game" && cl.Action != "stream" && cl.Action != "guest" {
+			errs = append(errs, fmt.Sprintf("claim %q: action must be game, stream or guest", cl.Name))
+		}
+		for _, re := range []string{cl.Path, cl.Not, cl.Args, cl.Dir} {
+			if _, err := regexp.Compile(re); err != nil {
+				errs = append(errs, fmt.Sprintf("claim %q: %v", cl.Name, err))
+			}
+		}
+		if (cl.Args != "" || cl.Dir != "") && len(cl.Exe) == 0 && cl.Path == "" {
+			errs = append(errs, fmt.Sprintf("claim %q: args and dir need exe or path too", cl.Name))
 		}
 	}
 	if len(errs) > 0 {

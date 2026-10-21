@@ -2,6 +2,7 @@ package broker
 
 import (
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,11 +93,7 @@ func (b *Broker) recordLocked(now time.Time) {
 		occ = append(occ, harbor.Occupant{Kind: s.Kind, Owner: s.Name, Label: label, GPUs: b.cardsOf(e, s)})
 	}
 	for _, h := range b.hits {
-		label := h.Exe
-		if h.Kind == "game" {
-			label = GameTitle(h)
-		}
-		occ = append(occ, harbor.Occupant{Kind: h.Kind, Owner: h.Kind, Label: label})
+		occ = append(occ, harbor.Occupant{Kind: h.Kind, Owner: h.Kind, Label: hitLabel(h)})
 	}
 	for src, h := range b.hooks {
 		occ = append(occ, harbor.Occupant{Kind: h.kind, Owner: h.kind, Label: "hook: " + src})
@@ -105,6 +102,18 @@ func (b *Broker) recordLocked(now time.Time) {
 		occ = append(occ, harbor.Occupant{Kind: "hold", Owner: "hold", Label: b.manual.Reason})
 	}
 	b.rec.Occupants(now, occ)
+}
+
+// hitLabel names a detected game, stream or guest: a game by its title, a
+// guest by its claim in baton.toml ("digup"), a stream by its program.
+func hitLabel(h detect.Hit) string {
+	switch h.Kind {
+	case "game":
+		return GameTitle(h)
+	case "guest":
+		return h.Rule
+	}
+	return h.Exe
 }
 
 var launcherDir = regexp.MustCompile(`(?i)\\(?:steamapps\\common|Epic Games|XboxGames|GOG Games|GOG Galaxy\\Games|EA Games)\\([^\\]+)`)
@@ -241,12 +250,36 @@ func (b *Broker) Harbor(rng time.Duration) HarborView {
 		}
 		v.Board = append(v.Board, d)
 	}
+	guestRow := map[string]int{}
 	for _, h := range b.hits {
-		label := h.Exe
-		if h.Kind == "game" {
-			label = GameTitle(h)
+		label := hitLabel(h)
+		d := Departure{Vessel: label, Kind: h.Kind, Cargo: h.Exe, Status: "docked", Detail: h.Rule, Since: open[h.Kind+"\x00"+label]}
+		if h.Kind == "guest" {
+			// One row per guest: a venv's python.exe and the interpreter it
+			// starts both match, and only the second holds memory.
+			i, seen := guestRow[label]
+			if !seen {
+				i = len(v.Board)
+				guestRow[label] = i
+				d.Detail = "the LLMs wait"
+				v.Board = append(v.Board, d)
+			}
+			if b.snap != nil {
+				// A guest takes only what it allocates: show where.
+				g := &v.Board[i]
+				for card, u := range b.snap.ByPID[h.PID] {
+					if mib := int(u.Dedicated >> 20); mib > 0 {
+						if !slices.Contains(g.GPUs, card) {
+							g.GPUs = append(g.GPUs, card)
+						}
+						g.HoldMiB += mib
+					}
+				}
+				sort.Ints(g.GPUs)
+			}
+			continue
 		}
-		v.Board = append(v.Board, Departure{Vessel: label, Kind: h.Kind, Cargo: h.Exe, Status: "docked", Detail: h.Rule, Since: open[h.Kind+"\x00"+label]})
+		v.Board = append(v.Board, d)
 	}
 	if m := b.manual; m != nil {
 		v.Board = append(v.Board, Departure{Vessel: "hold", Kind: "hold", Cargo: m.Reason, Status: "reserved", Since: m.Since})

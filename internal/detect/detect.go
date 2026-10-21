@@ -1,5 +1,5 @@
 // Package detect turns the process table and the encoder sessions into
-// "a game is running" and "someone is streaming".
+// "a game is running", "someone is streaming" and "a guest needs the cards".
 package detect
 
 import (
@@ -12,10 +12,11 @@ import (
 	"baton/internal/config"
 	"baton/internal/games"
 	"baton/internal/telemetry"
+	"baton/internal/win"
 )
 
 type Hit struct {
-	Kind  string `json:"kind"` // game | stream
+	Kind  string `json:"kind"` // game | stream | guest
 	Rule  string `json:"rule"`
 	PID   int    `json:"pid,omitempty"`
 	Exe   string `json:"exe"`
@@ -29,12 +30,15 @@ type rule struct {
 	exe    []string
 	path   *regexp.Regexp
 	not    *regexp.Regexp
-	source string // builtin | config
+	args   *regexp.Regexp // on the command line, read only for processes exe or path already matched
+	dir    *regexp.Regexp // on the folder the process runs in, read likewise
+	source string         // builtin | config
 }
 
 // Builtin game rules match where Windows launchers install games. Windows
-// gives the image path for free, so path rules are reliable; command lines
-// would need reading another process's memory.
+// gives the image path for free, so path rules are reliable; a command line
+// or working folder costs a query per process, so only claims with args or
+// dir read them.
 var builtin = []rule{
 	{name: "steam", kind: "game", path: regexp.MustCompile(`(?i)\\steamapps\\common\\`),
 		not: regexp.MustCompile(`(?i)\\steamapps\\common\\(wallpaper_engine|Lossless Scaling|Steamworks Shared|Steam Controller Configs|SteamVR\\bin\\win64\\(vrserver|vrmonitor|vrcompositor|vrdashboard|vrwebhelper))`)},
@@ -65,6 +69,8 @@ type Detector struct {
 	claims         []rule
 	ignore         []string
 	encoders       map[string]bool
+	cmdline        func(pid int, start int64) (string, error)
+	cwd            func(pid int, start int64) (string, error)
 
 	mu   sync.Mutex
 	user games.Data
@@ -97,7 +103,7 @@ func BuiltinNames() []string {
 }
 
 func New(cfg *config.Config) (*Detector, error) {
-	d := &Detector{encoders: map[string]bool{}, ignore: append(helperExe, lower(cfg.Detect.IgnoreExe)...), builtinDefault: cfg.Detect.Games}
+	d := &Detector{encoders: map[string]bool{}, ignore: append(helperExe, lower(cfg.Detect.IgnoreExe)...), builtinDefault: cfg.Detect.Games, cmdline: win.CommandLine, cwd: win.CurrentDir}
 	for _, c := range cfg.Claims {
 		r := rule{name: c.Name, kind: c.Action, exe: lower(c.Exe), source: "config"}
 		if r.kind == "" {
@@ -116,6 +122,20 @@ func New(cfg *config.Config) (*Detector, error) {
 				return nil, err
 			}
 			r.not = re
+		}
+		if c.Args != "" {
+			re, err := regexp.Compile(c.Args)
+			if err != nil {
+				return nil, err
+			}
+			r.args = re
+		}
+		if c.Dir != "" {
+			re, err := regexp.Compile(c.Dir)
+			if err != nil {
+				return nil, err
+			}
+			r.dir = re
 		}
 		d.claims = append(d.claims, r)
 	}
@@ -142,8 +162,8 @@ func globAny(name string, pats []string) bool {
 	return false
 }
 
-// Scan reports games and streams in the snapshot. exclude names PIDs that
-// belong to managed engines, which are never games.
+// Scan reports games, streams and guests in the snapshot. exclude names PIDs
+// that belong to managed engines, which are never games.
 func (d *Detector) Scan(snap *telemetry.Snapshot, exclude map[int]bool) []Hit {
 	d.mu.Lock()
 	user := d.user
@@ -181,6 +201,14 @@ func (d *Detector) Scan(snap *telemetry.Snapshot, exclude map[int]bool) []Hit {
 			}
 			if matched && r.not != nil && p.Path != "" && r.not.MatchString(p.Path) {
 				matched = false
+			}
+			if matched && r.args != nil {
+				line, err := d.cmdline(p.PID, p.Start)
+				matched = err == nil && r.args.MatchString(line)
+			}
+			if matched && r.dir != nil {
+				dir, err := d.cwd(p.PID, p.Start)
+				matched = err == nil && r.dir.MatchString(dir)
 			}
 			if matched {
 				out = append(out, Hit{Kind: r.kind, Rule: r.name, PID: p.PID, Exe: p.Name, Path: p.Path})

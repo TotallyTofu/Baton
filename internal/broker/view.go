@@ -21,6 +21,7 @@ type View struct {
 	ModeWhy   string          `json:"mode_why,omitempty"`
 	ModeSince time.Time       `json:"mode_since"`
 	Hold      *manualHold     `json:"hold,omitempty"`
+	Guest     *GuestView      `json:"guest,omitempty"`
 	Hits      []detect.Hit    `json:"hits"`
 	Holder    string          `json:"holder,omitempty"`
 	RestoreTo string          `json:"restore_to,omitempty"`
@@ -83,6 +84,12 @@ type AgroundView struct {
 	TotalMiB int         `json:"total_mib"`
 }
 
+// GuestView is a guest that has the cards: the LLMs stay off until it is done.
+type GuestView struct {
+	Why   string    `json:"why"`
+	Since time.Time `json:"since"`
+}
+
 type GateView struct {
 	Waiting int `json:"waiting"`
 	Running int `json:"running"`
@@ -108,7 +115,7 @@ func ramHolders(snap *telemetry.Snapshot, tag map[int]string) []RAMHolder {
 		key, h := strings.ToLower(p.Name), RAMHolder{Name: p.Name}
 		if t, ok := tag[p.PID]; ok {
 			h.Tag = t
-			if t != "game" && t != "stream" {
+			if t != "game" && t != "stream" && t != "guest" {
 				key = "engine:" + t // all of an engine's processes together
 			}
 		} else if systemExe[key] {
@@ -143,6 +150,9 @@ func (b *Broker) View(eventsSince int64) View {
 	}
 	if v.RestoreTo == "" {
 		v.RestoreTo = b.pendingRest
+	}
+	if !b.guestSince.IsZero() {
+		v.Guest = &GuestView{Why: b.guestWhy, Since: b.guestSince}
 	}
 	if b.cur != nil {
 		v.Op = &OpView{No: b.cur.no, Name: b.cur.name, Stage: b.curStage, Since: b.cur.since}
