@@ -34,7 +34,7 @@ func OpenURL(u string) {
 
 func onReady(b *broker.Broker, dashURL string, quit func()) {
 	systray.SetIcon(icon("normal", nil))
-	systray.SetTooltip("Baton")
+	setTooltip("Baton")
 	systray.SetOnTapped(func() { OpenURL(dashURL) })
 
 	mStatus := systray.AddMenuItem("Baton", "")
@@ -107,7 +107,7 @@ func onReady(b *broker.Broker, dashURL string, quit func()) {
 			}
 			status := statusLine(v)
 			mStatus.SetTitle(status)
-			systray.SetTooltip(tooltip(v))
+			setTooltip(tooltip(v))
 			if v.Mode == broker.Hold {
 				mHold.Check()
 			} else {
