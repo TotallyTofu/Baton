@@ -20,6 +20,7 @@ import (
 	"baton/internal/detect"
 	"baton/internal/engine"
 	"baton/internal/events"
+	"baton/internal/harbor"
 	"baton/internal/telemetry"
 	"baton/internal/win"
 )
@@ -106,14 +107,25 @@ func (a *agroundRec) err(name, target string) *AgroundError {
 }
 
 type op struct {
-	key    string
-	name   string
-	urgent bool
-	fn     func(ctx context.Context) error
-	done   chan struct{}
-	err    error
-	since  time.Time
+	key     string
+	name    string
+	urgent  bool
+	fn      func(ctx context.Context) error
+	done    chan struct{}
+	err     error
+	since   time.Time // queued
+	no      int64     // ticket number on the departures board
+	started time.Time
+	freed   int // MiB its releases gave back, measured
 }
+
+// manualKey marks an op you asked for (release, force stop, free all): its
+// releases free the cards but avoid no collision.
+type manualKey struct{}
+
+func manual(ctx context.Context) context.Context { return context.WithValue(ctx, manualKey{}, true) }
+
+func isManual(ctx context.Context) bool { v, _ := ctx.Value(manualKey{}).(bool); return v }
 
 type hookSig struct {
 	kind  string
@@ -171,7 +183,25 @@ type Broker struct {
 	since        map[string]time.Time // when each engine started occupying the cards
 	aground      map[string]*agroundRec
 	remote       func() (ip, errText string)
+	rec          *harbor.Recorder // the dashboard's history; nil keeps none
 }
+
+// SetRecorder gives the broker the history to record into.
+func (b *Broker) SetRecorder(r *harbor.Recorder) {
+	b.mu.Lock()
+	b.rec = r
+	b.mu.Unlock()
+}
+
+// Recorder is the history the broker records into (nil if none).
+func (b *Broker) Recorder() *harbor.Recorder {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.rec
+}
+
+// count changes the history's counters.
+func (b *Broker) count(f func(c *harbor.Counters)) { b.Recorder().Count(f) }
 
 // SetRemote tells the view how to report the Tailscale address.
 func (b *Broker) SetRemote(fn func() (string, string)) {
@@ -232,7 +262,7 @@ func (b *Broker) submit(key, name string, urgent bool, fn func(context.Context) 
 	if o, ok := b.byKey[key]; ok && key != "" {
 		return o
 	}
-	o := &op{key: key, name: name, urgent: urgent, fn: fn, done: make(chan struct{}), since: time.Now()}
+	o := &op{key: key, name: name, urgent: urgent, fn: fn, done: make(chan struct{}), since: time.Now(), no: b.rec.Ticket()}
 	if key != "" {
 		b.byKey[key] = o
 	}
@@ -271,10 +301,12 @@ func (b *Broker) worker(ctx context.Context) {
 		}
 		octx, cancel := context.WithCancel(ctx)
 		b.cur, b.curCancel, b.curStage = o, cancel, ""
+		o.started = time.Now()
 		b.mu.Unlock()
 
 		o.err = o.fn(octx)
-		if errors.Is(o.err, context.Canceled) && ctx.Err() == nil {
+		cancelled := errors.Is(o.err, context.Canceled) && ctx.Err() == nil
+		if cancelled {
 			o.err = errors.New("cancelled: the GPUs were taken for something with higher priority")
 		}
 		cancel()
@@ -285,8 +317,33 @@ func (b *Broker) worker(ctx context.Context) {
 			delete(b.byKey, o.key)
 		}
 		b.mu.Unlock()
+		if ctx.Err() == nil {
+			b.Recorder().Voyage(voyageOf(o, cancelled))
+		}
 		close(o.done)
 	}
+}
+
+// voyageOf is a finished op as the departures board lists it.
+func voyageOf(o *op, cancelled bool) harbor.Voyage {
+	v := harbor.Voyage{No: o.no, Name: o.name, Start: o.started, Dur: time.Since(o.started).Round(100 * time.Millisecond).Seconds(), Result: "ok", FreedMiB: o.freed}
+	var h *HeldError
+	var ag *AgroundError
+	switch {
+	case o.err == nil:
+	case cancelled:
+		v.Result = "cancelled"
+	case errors.As(o.err, &ag):
+		v.Result = "aground"
+	case errors.As(o.err, &h):
+		v.Result = "refused"
+	default:
+		v.Result = "failed"
+	}
+	if o.err != nil {
+		v.Detail = o.err.Error()
+	}
+	return v
 }
 
 func (b *Broker) stage(format string, args ...any) {
@@ -365,7 +422,10 @@ func (b *Broker) tick(ctx context.Context, first bool) {
 	} else {
 		b.modeWhy = why
 	}
+	b.recordLocked(now)
+	rec := b.rec
 	b.mu.Unlock()
+	rec.MaybeSave()
 
 	if want != from {
 		b.transition(from, want, why)
@@ -518,11 +578,13 @@ func (b *Broker) transition(from, to Mode, why string) {
 		b.ev.Infof("mode", "", "%s -> %s: %s", from, to, why)
 	case held(to):
 		b.ev.Infof("mode", "", "%s: %s; freeing every GPU", strings.ToUpper(string(to)), why)
+		b.count(func(c *harbor.Counters) { c.Yields++ })
 		b.submit("mode", "free GPUs for "+string(to), true, func(ctx context.Context) error {
 			return b.freeFor(ctx, b.allGPUs(), b.cfg.Policy.Game.Drain.Duration, true, true)
 		})
 	case to == Stream && from == Normal:
 		b.ev.Infof("mode", "", "STREAM: %s", why)
+		b.count(func(c *harbor.Counters) { c.Yields++ })
 		b.submit("mode", "prepare for stream", true, func(ctx context.Context) error {
 			return b.enterStream(ctx)
 		})
@@ -630,7 +692,7 @@ func (b *Broker) busy(e engine.Engine, s engine.Status) (bool, string) {
 func (b *Broker) drain(ctx context.Context, e engine.Engine, max time.Duration, interrupt bool) error {
 	name := e.Config().Name
 	deadline := time.Now().Add(max)
-	calm := 0
+	calm, waited := 0, false
 	for {
 		s := b.fresh(ctx, e)
 		busy, why := b.busy(e, s)
@@ -641,6 +703,10 @@ func (b *Broker) drain(ctx context.Context, e engine.Engine, max time.Duration, 
 			}
 		} else {
 			calm = 0
+			if !waited {
+				waited = true
+				b.count(func(c *harbor.Counters) { c.Drains++ })
+			}
 			if time.Now().After(deadline) {
 				if interrupt {
 					if err := e.Interrupt(ctx); err == nil && e.Config().Kind == "comfyui" {
@@ -743,6 +809,7 @@ func (b *Broker) waitFreed(ctx context.Context, e engine.Engine, gpus []int, bef
 			err := a.err(name, "")
 			b.mu.Unlock()
 			b.ev.Warnf("release", name, "aground: %v", err)
+			b.count(func(c *harbor.Counters) { c.Aground++ })
 			return err
 		}
 		b.stage("waiting for %s to free %d MiB", name, left)
@@ -785,6 +852,10 @@ func (b *Broker) releaseOne(ctx context.Context, e engine.Engine, mode string, g
 	name := e.Config().Name
 	s := b.fresh(ctx, e)
 	before := s.Procs()
+	held := 0
+	for _, g := range gpus {
+		held += s.VRAMMiB[g]
+	}
 	b.stage("releasing %s (%s)", name, mode)
 	b.ev.Infof("release", name, "releasing %s (%s)", name, mode)
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -801,7 +872,20 @@ func (b *Broker) releaseOne(ctx context.Context, e engine.Engine, mode string, g
 	if b.holder == name {
 		b.holder = ""
 	}
+	if werr == nil && b.cur != nil {
+		b.cur.freed += held
+	}
 	b.mu.Unlock()
+	if werr == nil {
+		// What the driver showed it holding, now read as free. A release you
+		// asked for frees memory but hands it to no one.
+		b.count(func(c *harbor.Counters) {
+			c.HandedMiB += int64(held)
+			if !isManual(ctx) && held > 0 {
+				c.Handoffs++
+			}
+		})
+	}
 	return werr
 }
 
@@ -1081,6 +1165,9 @@ func (b *Broker) doActivate(ctx context.Context, target engine.Engine, model, wh
 		b.comfyTook = ""
 	}
 	b.mu.Unlock()
+	if prev != name {
+		b.count(func(c *harbor.Counters) { c.Switches++ })
+	}
 	if prev != name || time.Since(start) > 2*time.Second {
 		b.ev.Infof("switch", name, "%s holds the GPUs (%s, ready in %.1fs)", name, why, time.Since(start).Seconds())
 	}
@@ -1095,12 +1182,19 @@ func (b *Broker) Activate(ctx context.Context, name, model, why string) error {
 		return fmt.Errorf("no engine %q", name)
 	}
 	if h := b.heldFor(e); h != nil {
+		b.count(func(c *harbor.Counters) { c.Refused++ })
 		return h
 	}
 	o := b.submit("activate:"+name+":"+model, "switch to "+name, false, func(ctx context.Context) error {
 		return b.doActivate(ctx, e, model, why)
 	})
-	return wait(ctx, o)
+	err := wait(ctx, o)
+	var h *HeldError
+	var ag *AgroundError
+	if errors.As(err, &h) || errors.As(err, &ag) {
+		b.count(func(c *harbor.Counters) { c.Refused++ })
+	}
+	return err
 }
 
 // Ready reports whether name can serve right now without a switch.
@@ -1130,7 +1224,7 @@ func (b *Broker) ReleaseEngine(ctx context.Context, name string) error {
 		return fmt.Errorf("no engine %q", name)
 	}
 	o := b.submit("release:"+name, "release "+name, false, func(ctx context.Context) error {
-		return b.releaseOne(ctx, e, e.Config().Release, e.Config().GPUs)
+		return b.releaseOne(manual(ctx), e, e.Config().Release, e.Config().GPUs)
 	})
 	return wait(ctx, o)
 }
@@ -1143,7 +1237,7 @@ func (b *Broker) Reclaim(ctx context.Context, name string) error {
 		return fmt.Errorf("no engine %q", name)
 	}
 	o := b.submit("reclaim:"+name, "force stop "+name, false, func(ctx context.Context) error {
-		return b.releaseOne(ctx, e, "stop", e.Config().GPUs)
+		return b.releaseOne(manual(ctx), e, "stop", e.Config().GPUs)
 	})
 	return wait(ctx, o)
 }
@@ -1151,7 +1245,7 @@ func (b *Broker) Reclaim(ctx context.Context, name string) error {
 // FreeAll releases every engine without reserving the cards.
 func (b *Broker) FreeAll(ctx context.Context) error {
 	o := b.submit("free-all", "free all GPUs", false, func(ctx context.Context) error {
-		return b.freeFor(ctx, b.allGPUs(), b.cfg.Policy.Game.Drain.Duration, false, false)
+		return b.freeFor(manual(ctx), b.allGPUs(), b.cfg.Policy.Game.Drain.Duration, false, false)
 	})
 	return wait(ctx, o)
 }
@@ -1371,6 +1465,9 @@ func (b *Broker) GateAcquire(ctx context.Context, promptID string, maxWait time.
 
 func (b *Broker) grant(promptID string) {
 	b.mu.Lock()
+	if g, ok := b.gateWait[promptID]; ok && time.Since(g.first) >= 2*time.Second {
+		defer b.count(func(c *harbor.Counters) { c.GateHeld++ })
+	}
 	delete(b.gateWait, promptID)
 	b.gateRun[promptID] = gateEntry{first: time.Now(), last: time.Now()}
 	b.mu.Unlock()

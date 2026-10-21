@@ -119,7 +119,7 @@ type TabbyMetrics struct {
 }
 
 var (
-	mGen    = regexp.MustCompile(`^(\d\d:\d\d:\d\d)\S*\s+INFO:\s+(#\d+ [^:]+):\s+([\d,]+) tokens generated at ([\d.]+) T/s`)
+	mGen    = regexp.MustCompile(`^(\d\d:\d\d:\d\d)\S*\s+INFO:\s+(#\d+ [^:]+):\s+([\d,]+) tokens generated(?: at ([\d.]+) T/s)?`)
 	mPrompt = regexp.MustCompile(`prompt ([\d,]+) tokens, (?:(\d+)%|(none|all)) cached(?:, ([\d,]+) new in ([\d.]+) s(?: \(([\d,.]+) T/s\))?)?`)
 	mFirst  = regexp.MustCompile(`first token ([\d.]+) s`)
 	mTotal  = regexp.MustCompile(`total ([\d.]+) s`)
@@ -189,25 +189,52 @@ func ParseTabbyMetrics(text string) *TabbyMetrics {
 type tabbyReqs struct {
 	marker  time.Time            // when baton last started TabbyAPI; zero if not seen
 	running map[string]time.Time // request tag ("12", or "12.1" for one of n choices) -> start
+	prompts map[string]int       // request tag -> its prompt tokens
 	done    map[string]bool      // ended: reading its start again must not revive it
 	pending string               // the last record; wrapped lines may still extend it
 	applied bool                 // pending has been applied as it stands
+
+	window, pool int             // context window and cache size of the last load
+	model        string          // the model of the last load
+	clock        time.Time       // the log's time, dated from the marker
+	fin          []tabbyFinished // finished requests not collected yet
+}
+
+// tabbyFinished is a request TabbyAPI summed up when it finished.
+type tabbyFinished struct {
+	Tag    string
+	Run    time.Time // the start marker it follows; zero if none was read
+	At     time.Time
+	M      TabbyMetrics
+	Window int
+	Model  string
 }
 
 const markerPrefix = "===== baton started "
 
 var (
 	rqLine   = regexp.MustCompile(`^(\d\d):(\d\d):(\d\d)\S*\s+(INFO|WARNING|ERROR):\s+(.*)$`)
-	rqStart  = regexp.MustCompile(`^#(\d+(?:\.\d+)?) [^:]*: [\d,]+ prompt tokens`)
+	rqStart  = regexp.MustCompile(`^#(\d+(?:\.\d+)?) [^:]*: ([\d,]+) prompt tokens`)
 	rqFinish = regexp.MustCompile(`^#(\d+(?:\.\d+)?) [^:]*: [\d,]+ tokens generated`)
 	// A client that went away (noticed by non-stream requests), a Kobold
 	// abort, or an error sent back to the request. These name the request
 	// without a choice index, so they end all of its choices.
 	rqEnd = regexp.MustCompile(`^(?:Sent to request: )?#(\d+)(?:\.\d+)? .*(?:client disconnected|cancelled|aborted)`)
+	// What a model load reports: its file and its context and cache sizes.
+	rqLoad    = regexp.MustCompile(`^Loading model (.+?)(?: \([^)]*\))?\s*$`)
+	rqContext = regexp.MustCompile(`^Context: max_seq_len ([\d,]+) tokens.*?cache_size ([\d,]+) tokens`)
 )
 
 func (r *tabbyReqs) reset() {
 	r.marker, r.running, r.done = time.Time{}, map[string]time.Time{}, map[string]bool{}
+	r.prompts, r.window, r.pool, r.model, r.clock = map[string]int{}, 0, 0, "", time.Time{}
+}
+
+// take hands over the finished requests read since the last call.
+func (r *tabbyReqs) take() []tabbyFinished {
+	f := r.fin
+	r.fin = nil
+	return f
 }
 
 // feed takes the next whole lines of the log.
@@ -254,16 +281,32 @@ func (r *tabbyReqs) apply(rec string, now time.Time) {
 	if m == nil {
 		return
 	}
+	at := r.stamp(m[1], m[2], m[3], now)
 	level, msg := m[4], m[5]
 	if level == "INFO" {
 		if s := rqStart.FindStringSubmatch(msg); s != nil {
 			if _, ok := r.running[s[1]]; !ok && !r.done[s[1]] {
 				r.running[s[1]] = logClock(m[1], m[2], m[3], now)
+				r.prompts[s[1]] = atoi(s[2])
 			}
 			return
 		}
 		if s := rqFinish.FindStringSubmatch(msg); s != nil {
 			r.end(s[1])
+			// A record applied again (wrapped lines extended it) is handed
+			// over again; the receiver keeps the fuller copy.
+			if met := ParseTabbyMetrics(rec); met != nil {
+				r.fin = append(r.fin, tabbyFinished{Tag: s[1], Run: r.marker, At: at, M: *met, Window: r.window, Model: r.model})
+			}
+			return
+		}
+		if s := rqContext.FindStringSubmatch(msg); s != nil {
+			r.window, r.pool = atoi(s[1]), atoi(s[2])
+			return
+		}
+		if s := rqLoad.FindStringSubmatch(msg); s != nil {
+			p := strings.TrimRight(s[1], `\/`)
+			r.model = p[strings.LastIndexAny(p, `\/`)+1:]
 			return
 		}
 	}
@@ -289,7 +332,33 @@ func (r *tabbyReqs) apply(rec string, now time.Time) {
 
 func (r *tabbyReqs) end(tag string) {
 	delete(r.running, tag)
+	delete(r.prompts, tag)
 	r.done[tag] = true
+}
+
+// stamp dates a time of day from the log. After baton's start marker the
+// log's own clock runs on from the marker's date, so a log read days later
+// still dates its lines right; without a marker it is the latest such moment
+// not after now.
+func (r *tabbyReqs) stamp(h, m, s string, now time.Time) time.Time {
+	base := r.clock
+	if base.IsZero() {
+		base = r.marker
+	}
+	if base.IsZero() {
+		return logClock(h, m, s, now)
+	}
+	base = base.In(now.Location())
+	y, mo, d := base.Date()
+	t := time.Date(y, mo, d, atoi(h), atoi(m), atoi(s), 0, now.Location())
+	if t.Before(base.Add(-time.Minute)) {
+		t = t.AddDate(0, 0, 1) // past midnight
+	}
+	if t.After(now.Add(time.Minute)) {
+		return logClock(h, m, s, now)
+	}
+	r.clock = t
+	return t
 }
 
 func (r *tabbyReqs) endAll() {

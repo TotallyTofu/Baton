@@ -24,6 +24,7 @@ import (
 	"baton/internal/broker"
 	"baton/internal/config"
 	"baton/internal/events"
+	"baton/internal/harbor"
 	"baton/internal/netx"
 )
 
@@ -214,6 +215,7 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request) {
 	var stream bool
 	_ = json.Unmarshal(req["stream"], &stream)
 
+	began := time.Now()
 	eng, upModel, err := g.b.Route(model)
 	if err != nil {
 		jsonErr(w, http.StatusNotFound, "model_not_found", err.Error(), 0)
@@ -259,6 +261,7 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(aerr, context.Canceled) && r.Context().Err() != nil {
 				return // client went away
 			}
+			g.record(harbor.Request{At: time.Now(), Engine: name, Model: model, Route: route(r), Status: http.StatusServiceUnavailable, Error: code, Total: time.Since(began).Seconds()})
 			if out.started {
 				out.fail(code, aerr.Error())
 			} else {
@@ -296,11 +299,13 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request) {
 		ureq.Header[k] = v
 	}
 	ureq.Header.Set("Content-Type", "application/json")
+	sent := time.Now()
 	resp, err := upstream.Do(ureq)
 	if err != nil {
 		if r.Context().Err() != nil {
 			return
 		}
+		g.record(harbor.Request{At: time.Now(), Engine: name, Model: model, Route: route(r), Status: http.StatusBadGateway, Error: "upstream", Total: time.Since(began).Seconds()})
 		if out.started {
 			out.fail("upstream", err.Error())
 		} else {
@@ -309,6 +314,10 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		// An engine's log does not see the requests it turned away.
+		g.record(harbor.Request{At: time.Now(), Engine: name, Model: model, Route: route(r), Status: resp.StatusCode, Error: "upstream", Total: time.Since(began).Seconds()})
+	}
 
 	if out.started {
 		// Headers are gone already: an upstream error becomes an SSE error.
@@ -328,10 +337,24 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Baton-Engine", name)
 		w.WriteHeader(resp.StatusCode)
 	}
+	// The tail of the answer holds its usage: the last chunk of a stream, the
+	// end of a JSON body.
+	meter := resp.StatusCode/100 == 2 && !g.b.Metered(name)
+	var tail []byte
+	var first time.Time
 	buf := make([]byte, 16<<10)
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
+			if first.IsZero() {
+				first = time.Now()
+			}
+			if meter {
+				tail = append(tail, buf[:n]...)
+				if len(tail) > tailMax {
+					tail = append(tail[:0], tail[len(tail)-tailMax/2:]...)
+				}
+			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return
 			}
@@ -340,9 +363,96 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if rerr != nil {
+			if meter && errors.Is(rerr, io.EOF) {
+				g.record(served(name, model, route(r), stream, tail, sent, first, time.Now()))
+			}
 			return
 		}
 	}
+}
+
+const tailMax = 256 << 10
+
+// record keeps a request in the dashboard's history.
+func (g *Gateway) record(q harbor.Request) {
+	q.Source = "gateway"
+	g.b.Recorder().Request(q)
+}
+
+// route is the API path a request went to, as TabbyAPI's log names it.
+func route(r *http.Request) string { return strings.TrimPrefix(r.URL.Path, "/v1/") }
+
+// served reads what an engine answered: OpenAI usage (token counts), and
+// llama.cpp's timings when it sends them (its own rates). Without timings a
+// stream's decode rate is worked out from the time between its first byte and
+// its end; a plain answer gets none, its prefill can't be told apart.
+func served(engine, model, route string, stream bool, tail []byte, sent, first, end time.Time) harbor.Request {
+	q := harbor.Request{At: end, Engine: engine, Model: model, Route: route, Status: http.StatusOK, Total: end.Sub(sent).Seconds()}
+	if stream && !first.IsZero() {
+		q.FirstTok = first.Sub(sent).Seconds()
+	}
+	var u struct {
+		Prompt     int `json:"prompt_tokens"`
+		Completion int `json:"completion_tokens"`
+		Details    struct {
+			Cached int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	}
+	if lastObject(tail, "usage", &u) {
+		q.Prompt, q.Output, q.Cached = u.Prompt, u.Completion, u.Details.Cached
+	}
+	var t struct {
+		PromptN  int     `json:"prompt_n"`
+		PromptPS float64 `json:"prompt_per_second"`
+		PredN    int     `json:"predicted_n"`
+		PredPS   float64 `json:"predicted_per_second"`
+		CacheN   int     `json:"cache_n"`
+	}
+	if lastObject(tail, "timings", &t) {
+		q.PromptTPS, q.DecodeTPS = round1(t.PromptPS), round1(t.PredPS)
+		if q.Output == 0 {
+			q.Output = t.PredN
+		}
+		if q.Prompt == 0 {
+			q.Prompt = t.PromptN + t.CacheN
+		}
+		if q.Cached == 0 {
+			q.Cached = t.CacheN
+		}
+	}
+	if q.DecodeTPS == 0 && stream && q.Output > 1 && !first.IsZero() {
+		if d := end.Sub(first).Seconds(); d > 0.05 {
+			q.DecodeTPS = round1(float64(q.Output-1) / d)
+		}
+	}
+	return q
+}
+
+func round1(f float64) float64 { return float64(int(f*10+0.5)) / 10 }
+
+// lastObject decodes the JSON object that is the value of the last "key" in
+// b, skipping a null (a stream's chunks carry "usage": null until the last).
+func lastObject(b []byte, key string, v any) bool {
+	k := []byte(`"` + key + `"`)
+	for end := len(b); end > 0; {
+		i := bytes.LastIndex(b[:end], k)
+		if i < 0 {
+			return false
+		}
+		end = i
+		rest := bytes.TrimLeft(b[i+len(k):], " \t\r\n")
+		if len(rest) == 0 || rest[0] != ':' {
+			continue
+		}
+		rest = bytes.TrimLeft(rest[1:], " \t\r\n")
+		if len(rest) == 0 || rest[0] != '{' {
+			continue
+		}
+		if json.NewDecoder(bytes.NewReader(rest)).Decode(v) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Gateway) heldNow(name string) *broker.HeldError {

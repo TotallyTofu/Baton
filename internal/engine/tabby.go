@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"baton/internal/config"
+	"baton/internal/harbor"
 	"baton/internal/telemetry"
 )
 
@@ -132,6 +135,7 @@ func (t *tabby) trackRequests(st *Status, now time.Time) {
 		t.idleSince = time.Time{}
 	}
 	st.BusyExact = true
+	t.kvLocked(st, now)
 	switch n := len(t.reqs.running); n {
 	case 0:
 	case 1:
@@ -181,8 +185,69 @@ func (t *tabby) readRequests(path string, now time.Time) bool {
 		}
 		t.reqs.feed(text, now)
 		t.reqOff = next
+		t.record(t.reqs.take())
 	}
 	return true
+}
+
+// record hands finished requests to the request history. The key makes a
+// record read again (the log after a restart, or completed by wrapped lines)
+// replace itself: TabbyAPI numbers requests from #1 each time it starts, so
+// the key carries the start marker too.
+func (t *tabby) record(fin []tabbyFinished) {
+	if t.env.Record == nil {
+		return
+	}
+	for _, f := range fin {
+		run := f.At.Format("2006-01-02")
+		if !f.Run.IsZero() {
+			run = strconv.FormatInt(f.Run.Unix(), 10)
+		}
+		m := f.M
+		model := f.Model
+		if model == "" {
+			model = t.modelName
+		}
+		_, route, _ := strings.Cut(m.Request, " ")
+		t.env.Record(harbor.Request{
+			Key: t.cfg.Name + "|" + run + "|" + f.Tag, At: f.At, Engine: t.cfg.Name, Model: model,
+			Source: "log", Route: route, Status: 200,
+			Prompt: m.Prompt, Cached: m.Prompt * m.CachedPct / 100, Output: m.Tokens,
+			PromptTPS: m.PromptTPS, DecodeTPS: m.Decode, FirstTok: m.FirstToken, Total: m.Total,
+			DraftOK: m.DraftOK, DraftAll: m.DraftAll, Window: f.Window,
+		})
+	}
+}
+
+// kvLocked adds what the log tells about the KV cache of the TabbyAPI running
+// now: the window and pool of its load, if the server did not report them,
+// and the prompt tokens of each request in flight.
+func (t *tabby) kvLocked(st *Status, now time.Time) {
+	kv, _ := st.Extra["kv"].(map[string]any)
+	if kv == nil {
+		kv = map[string]any{}
+	}
+	if _, ok := kv["window"]; !ok && t.reqs.window > 0 {
+		kv["window"] = t.reqs.window
+	}
+	if _, ok := kv["pool"]; !ok && t.reqs.pool > 0 {
+		kv["pool"] = t.reqs.pool
+	}
+	type flight struct {
+		Tag    string  `json:"tag"`
+		Prompt int     `json:"prompt"`
+		Age    float64 `json:"age_s"`
+	}
+	fl := []flight{}
+	for tag, at := range t.reqs.running {
+		fl = append(fl, flight{Tag: tag, Prompt: t.reqs.prompts[tag], Age: max(now.Sub(at), 0).Round(time.Second).Seconds()})
+	}
+	sort.Slice(fl, func(i, j int) bool { return fl[i].Age > fl[j].Age })
+	kv["inflight"] = fl
+	if st.Extra == nil {
+		st.Extra = map[string]any{}
+	}
+	st.Extra["kv"] = kv
 }
 
 // logTrusted reports whether the log shows the TabbyAPI running now: baton
@@ -248,7 +313,8 @@ func (t *tabby) probeServer(ctx context.Context, snap *telemetry.Snapshot) Statu
 	pctx, cancel := probeCtx(ctx)
 	defer cancel()
 	var card struct {
-		ID string `json:"id"`
+		ID         string         `json:"id"`
+		Parameters map[string]any `json:"parameters"`
 	}
 	err := doJSON(pctx, "GET", t.cfg.URL+"/v1/model", t.hdr(false), nil, &card)
 	var he *httpError
@@ -257,6 +323,19 @@ func (t *tabby) probeServer(ctx context.Context, snap *telemetry.Snapshot) Statu
 		st.Up, st.Loaded = true, true
 		if card.ID != "" {
 			st.Model = card.ID
+		}
+		// The window and cache pool the server reports for the loaded model.
+		kv := map[string]any{}
+		for from, to := range map[string]string{"max_seq_len": "window", "cache_size": "pool"} {
+			if v, ok := card.Parameters[from].(float64); ok && v > 0 {
+				kv[to] = int(v)
+			}
+		}
+		if v, ok := card.Parameters["cache_mode"].(string); ok && v != "" {
+			kv["cache_mode"] = v
+		}
+		if len(kv) > 0 {
+			st.Extra = map[string]any{"kv": kv}
 		}
 	case errors.As(err, &he) && he.Code == 503:
 		st.Up = true // server up, no model loaded

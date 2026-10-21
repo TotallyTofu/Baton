@@ -22,6 +22,7 @@ import (
 
 	"baton/internal/config"
 	"baton/internal/events"
+	"baton/internal/harbor"
 	"baton/internal/telemetry"
 	"baton/internal/win"
 )
@@ -84,6 +85,7 @@ type Env struct {
 	StateDir string
 	Events   *events.Log
 	Sample   func() *telemetry.Snapshot // a fresh snapshot
+	Record   func(harbor.Request)       // a request an engine saw finish (nil: not kept)
 }
 
 func New(c config.Engine, env *Env) (Engine, error) {

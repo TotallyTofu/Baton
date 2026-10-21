@@ -182,7 +182,71 @@ func (u *unsloth) Probe(ctx context.Context, snap *telemetry.Snapshot) Status {
 			st.Busy, st.BusyWhy = true, fmt.Sprintf("%d chat run(s) generating", n)
 		}
 	}
+	if st.Loaded {
+		if sl := slotsOf(pctx, snap, st, portOf(u.cfg.URL)); len(sl) > 0 {
+			if st.Extra == nil {
+				st.Extra = map[string]any{}
+			}
+			st.Extra["slots"] = sl
+		}
+	}
 	return st
+}
+
+// Slot is one llama.cpp server slot: a context window and what fills it.
+type Slot struct {
+	ID     int  `json:"id"`
+	Window int  `json:"window"`
+	Used   int  `json:"used"`   // prompt tokens in the slot
+	Cached int  `json:"cached"` // of those, reused from the cache
+	Busy   bool `json:"busy"`
+}
+
+// slotsOf reads /slots from a llama-server among the engine's processes
+// (Studio runs GGUF models in one), when it listens on loopback and answers
+// without a key. Anything else is no slot data, not an error.
+func slotsOf(ctx context.Context, snap *telemetry.Snapshot, st Status, skip int) []Slot {
+	llama := map[int]bool{}
+	for _, p := range st.procs {
+		if strings.HasPrefix(strings.ToLower(p.Name), "llama-server") {
+			llama[p.PID] = true
+		}
+	}
+	if len(llama) == 0 {
+		return nil
+	}
+	for port, pid := range snap.Listeners {
+		if !llama[pid] || port == skip {
+			continue
+		}
+		var raw []struct {
+			ID           int  `json:"id"`
+			State        any  `json:"state"`
+			IsProcessing bool `json:"is_processing"`
+			NCtx         int  `json:"n_ctx"`
+			NPrompt      int  `json:"n_prompt_tokens"`
+			NCache       int  `json:"n_prompt_tokens_cache"`
+		}
+		sctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+		err := doJSON(sctx, "GET", fmt.Sprintf("http://127.0.0.1:%d/slots", port), nil, nil, &raw)
+		cancel()
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		out := make([]Slot, 0, len(raw))
+		for _, s := range raw {
+			busy := s.IsProcessing
+			switch v := s.State.(type) {
+			case string:
+				busy = busy || v == "processing"
+			case float64:
+				busy = busy || v != 0
+			}
+			out = append(out, Slot{ID: s.ID, Window: s.NCtx, Used: s.NPrompt, Cached: s.NCache, Busy: busy})
+		}
+		return out
+	}
+	return nil
 }
 
 func countActive(v any) int {

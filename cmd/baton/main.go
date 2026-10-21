@@ -31,6 +31,7 @@ import (
 	"baton/internal/events"
 	"baton/internal/games"
 	"baton/internal/gateway"
+	"baton/internal/harbor"
 	"baton/internal/netx"
 	"baton/internal/server"
 	"baton/internal/telemetry"
@@ -203,7 +204,8 @@ func cmdDaemon(cfg *config.Config, args []string) int {
 	}
 	det.SetUser(store.Data())
 	store.OnChange(det.SetUser)
-	env := &engine.Env{StateDir: cfg.Daemon.StateDir, Events: ev, Sample: tel.Sample}
+	rec := harbor.Open(cfg.Daemon.StateDir)
+	env := &engine.Env{StateDir: cfg.Daemon.StateDir, Events: ev, Sample: tel.Sample, Record: rec.Request}
 	var engines []engine.Engine
 	for _, ec := range cfg.Engines {
 		if !ec.IsEnabled() {
@@ -216,6 +218,7 @@ func cmdDaemon(cfg *config.Config, args []string) int {
 		engines = append(engines, e)
 	}
 	b := broker.New(cfg, tel, ev, det, engines)
+	b.SetRecorder(rec)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -268,6 +271,7 @@ func cmdDaemon(cfg *config.Config, args []string) int {
 	if gwSrv != nil {
 		_ = gwSrv.Shutdown(sctx)
 	}
+	_ = rec.Save()
 	ev.Infof("start", "", "baton stopped (engines left running)")
 	return 0
 }

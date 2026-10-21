@@ -32,6 +32,9 @@ in the background with a tray icon and a web dashboard.
 - **Engine logs and stats.** TabbyAPI's output in the dashboard, with the last
   request's decode and prompt speed, draft (MTP) acceptance and time to first
   token.
+- **A dashboard with history**: memory over time per card, which model held
+  the cards when, every switch with its timing, and per-request speeds and
+  token counts (see [Dashboard](#dashboard)).
 - **From your phone** over Tailscale, if you want it.
 
 ## Requirements
@@ -59,6 +62,51 @@ engine answers, how to start it and which GPUs it uses (NVIDIA's numbering,
 as in `nvidia-smi`). Delete the engines you don't use.
 
 To run `baton` from any terminal, add its folder to your user `PATH`.
+
+## Dashboard
+
+`http://127.0.0.1:9797/` has two pages. Every figure on them is something
+baton measured (the driver, Windows' counters, an engine's own log or API, the
+gateway); where nothing was measured the page says so instead of guessing.
+
+**Harbor**, what is on the cards:
+
+- **The ticket counter**: collisions avoided (times a card was cleared and the
+  driver showed it free before the next user got it), VRAM released, switches,
+  drains, releases that ran aground, outside loads settled, refused switches,
+  games and streams, ComfyUI jobs held at the gate. Under it the last hour of
+  requests: median decode speed and time to first token, p95 request time,
+  requests per minute, what is waiting now, cache and draft acceptance rates.
+- **The tide**: each card's memory over the last hour, 6 hours or day,
+  stacked by who held it (each engine, a game, a stream, other apps, Windows,
+  the driver), and system RAM with each engine's share.
+- **Model timeline**: which model, game, stream or hold had the cards, when.
+- **Departures**: the change under way and the queue with their ticket
+  numbers, everything on the cards (docked, moored, boarding, aground), and the
+  recent voyages with how long each took and how much memory it freed.
+- **Harbor log** (filter by kind or text), **berths** (each card: memory by
+  holder, load, temperature, power, the processes on it), **the machine**
+  (RAM, commit, cache), games and streams, and **stowaways**: processes
+  holding real VRAM that belong to no engine, game or stream.
+
+**Engines & requests**:
+
+- **Engines**: each engine's state, model, last request speeds, VRAM and RAM,
+  with Use, Release, Force stop and Log.
+- **KV pool**: TabbyAPI's cache pool and context window (from the server, or
+  the load in its log) and the prompt tokens of each request in flight; the
+  slots of a llama.cpp server when one answers `/slots`.
+- **Throughput** (decode and prefill speed of each request), **token
+  ledger** (generated, fresh and cached tokens per hour, day, week and since
+  the start), **leaderboard** per model, **recent requests**, and **context
+  residency** (each request's tokens against its model's window).
+
+Where request figures come from: TabbyAPI's log, when baton started TabbyAPI,
+counts every request, including ones sent straight to its port. Other engines'
+requests are counted by the gateway (token usage from the answer, llama.cpp's
+timings when it sends them); requests sent to them directly are not seen. The
+counters, requests (7 days), timeline and voyages are kept in `harbor.json`
+across restarts; the tide starts over.
 
 ## Modes
 
@@ -195,6 +243,7 @@ baton key | config | autostart on|off | firewall | version
 | `%LOCALAPPDATA%\baton\logs\<engine>.log` | output of engines baton started |
 | `%LOCALAPPDATA%\baton\gateway.key` | gateway API key |
 | `%LOCALAPPDATA%\baton\state.json` | pending restore and holds, kept across restarts |
+| `%LOCALAPPDATA%\baton\harbor.json` | the dashboard's history: counters, requests, timeline, voyages |
 
 ## Two cards, fewer swaps
 
@@ -225,8 +274,11 @@ VRAM lease broker for Linux, and the
 [r/LocalLLaMA discussion](https://www.reddit.com/r/LocalLLaMA/comments/1xahi82/) around it.
 Ideas taken from Berth: engines leasing the card in priority order, waiting
 for a ComfyUI job to finish before a handoff, treating games as holders of the
-card, and the launcher-folder rules for spotting games. Baton is a separate
-implementation (no Berth code), written for Windows and multiple GPUs.
+card, and the launcher-folder rules for spotting games. The dashboard's harbor
+look and its panels (ticket counter, tide, model timeline, departures, KV
+pool, token ledger, leaderboard, context residency) follow Berth's harbor
+dashboard. Baton is a separate implementation (no Berth code), written for
+Windows and multiple GPUs.
 
 ## License
 

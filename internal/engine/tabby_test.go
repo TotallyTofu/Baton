@@ -295,3 +295,43 @@ func TestTabbyIdleGPUDropsRequests(t *testing.T) {
 		}
 	}
 }
+
+func TestTabbyReqsFinishedRecords(t *testing.T) {
+	start := time.Date(2026, 10, 18, 23, 58, 0, 0, time.Local)
+	log := "\n===== baton started start.bat at " + start.Format(time.RFC3339) + " =====\n" +
+		"23:58:10.000 INFO:     Context: max_seq_len 145,920 tokens (model default), cache_size 145,920 tokens\n" +
+		"23:58:12.000 INFO:     Loading model D:\\models\\Qwen3.8-27B-exl3 (manual GPU split)\n" +
+		"23:59:58.000 INFO:     #1 chat/completions (stream): 676 prompt tokens · top_k: 20 (preset)\n" +
+		"00:00:48.000 INFO:     #1 chat/completions (stream): 1,728 tokens generated at 35.9 T/s · prompt 676 tokens, 50% cached, 338 new in 2.08 s (325 T/s) · first token 2.08 s, total 50.2 s · draft 30/60 accepted (50%)\n" +
+		"00:01:00.000 INFO:     #2 chat/completions: 4,000 prompt tokens · top_k: 20 (preset)\n"
+	// Read two days later: the dates come from the marker, not from now.
+	r := track(log, at12)
+	fin := r.take()
+	if len(fin) != 1 {
+		t.Fatalf("finished = %+v", fin)
+	}
+	f := fin[0]
+	if want := time.Date(2026, 10, 19, 0, 0, 48, 0, time.Local); !f.At.Equal(want) {
+		t.Fatalf("finished at %v, want %v (past midnight, from the marker)", f.At, want)
+	}
+	if f.Tag != "1" || f.Window != 145920 || f.Model != "Qwen3.8-27B-exl3" || !f.Run.Equal(start) {
+		t.Fatalf("record: %+v", f)
+	}
+	if f.M.Tokens != 1728 || f.M.Prompt != 676 || f.M.CachedPct != 50 || f.M.DraftOK != 30 || f.M.Total != 50.2 {
+		t.Fatalf("metrics: %+v", f.M)
+	}
+	if r.take() != nil {
+		t.Fatal("take should hand records over once")
+	}
+	if r.window != 145920 || r.pool != 145920 || r.prompts["2"] != 4000 {
+		t.Fatalf("kv: window %d pool %d prompts %v", r.window, r.pool, r.prompts)
+	}
+	// A finish with no rate is still a record.
+	r.feed("00:01:30.000 INFO:     #2 chat/completions: 9 tokens generated · prompt 4,000 tokens, all cached\n", at12)
+	if fin := r.take(); len(fin) != 1 || fin[0].M.Tokens != 9 || fin[0].M.CachedPct != 100 || fin[0].M.Decode != 0 {
+		t.Fatalf("rate-less finish: %+v", fin)
+	}
+	if len(r.prompts) != 0 {
+		t.Fatalf("prompts of ended requests should go: %v", r.prompts)
+	}
+}

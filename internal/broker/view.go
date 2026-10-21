@@ -60,6 +60,7 @@ type RAMHolder struct {
 }
 
 type OpView struct {
+	No    int64     `json:"no,omitempty"` // ticket number
 	Name  string    `json:"name"`
 	Stage string    `json:"stage,omitempty"`
 	Since time.Time `json:"since"`
@@ -144,12 +145,11 @@ func (b *Broker) View(eventsSince int64) View {
 		v.RestoreTo = b.pendingRest
 	}
 	if b.cur != nil {
-		v.Op = &OpView{Name: b.cur.name, Stage: b.curStage, Since: b.cur.since}
+		v.Op = &OpView{No: b.cur.no, Name: b.cur.name, Stage: b.curStage, Since: b.cur.since}
 	}
 	for _, o := range b.queue {
 		v.Queue = append(v.Queue, o.name)
 	}
-	tag := map[int]string{}
 	for _, e := range b.engines {
 		name := e.Config().Name
 		s := b.st[name]
@@ -166,15 +166,8 @@ func (b *Broker) View(eventsSince int64) View {
 			}
 		}
 		v.Engines = append(v.Engines, row)
-		for _, pid := range s.PIDs {
-			tag[pid] = name
-		}
 	}
-	for _, h := range b.hits {
-		if _, ok := tag[h.PID]; !ok && h.PID != 0 {
-			tag[h.PID] = h.Kind
-		}
-	}
+	tag := b.pidTagsLocked()
 	if b.snap != nil {
 		v.Error = b.snap.Err
 		v.Memory = &MemView{MemInfo: b.snap.Mem, Holders: ramHolders(b.snap, tag)}

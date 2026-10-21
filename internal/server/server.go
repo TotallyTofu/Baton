@@ -3,12 +3,13 @@ package server
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -23,8 +24,12 @@ import (
 	"baton/internal/netx"
 )
 
-//go:embed web/index.html
-var indexHTML []byte
+//go:embed web
+var webFS embed.FS
+
+var indexHTML, _ = webFS.ReadFile("web/index.html")
+
+var assetType = map[string]string{".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
 
 type Server struct {
 	b     *broker.Broker
@@ -73,6 +78,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:")
 		w.Write(indexHTML)
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/assets/"):
+		s.asset(w, r, strings.TrimPrefix(path, "/assets/"))
+	case r.Method == http.MethodGet && path == "/api/harbor":
+		writeJSON(w, 200, s.b.Harbor(broker.ParseRange(r.URL.Query().Get("range"), time.Hour, 24*time.Hour)))
+	case r.Method == http.MethodGet && path == "/api/requests":
+		writeJSON(w, 200, s.b.Requests(broker.ParseRange(r.URL.Query().Get("range"), 24*time.Hour, 7*24*time.Hour)))
 	case r.Method == http.MethodGet && path == "/api/status":
 		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 		writeJSON(w, 200, s.b.View(since))
@@ -134,6 +145,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// asset serves the dashboard's scripts and styles.
+func (s *Server) asset(w http.ResponseWriter, r *http.Request, name string) {
+	ct := assetType[filepath.Ext(name)]
+	b, err := webFS.ReadFile("web/" + name)
+	if ct == "" || err != nil || strings.Contains(name, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(b)
 }
 
 func (s *Server) wide() bool {

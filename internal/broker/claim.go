@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"baton/internal/engine"
+	"baton/internal/harbor"
 )
 
 // Engines also load outside baton: a model picked in Unsloth Studio's UI,
@@ -87,7 +88,7 @@ func (b *Broker) claimLocked() {
 				if err := b.drain(ctx, eng, b.cfg.Policy.Game.Drain.Duration, true); err != nil {
 					return err
 				}
-				return b.releaseOne(ctx, eng, eng.Config().GameRelease, b.allGPUs())
+				return b.settled(b.releaseOne(ctx, eng, eng.Config().GameRelease, b.allGPUs()))
 			})
 			return
 		}
@@ -124,7 +125,7 @@ func (b *Broker) claimLocked() {
 					if err := b.drain(ctx, eng, b.cfg.Policy.Stream.ComfyDrain.Duration, true); err != nil {
 						return err
 					}
-					return b.releaseOne(ctx, eng, "free", eng.Config().GPUs)
+					return b.settled(b.releaseOne(ctx, eng, "free", eng.Config().GPUs))
 				})
 				return
 			}
@@ -184,6 +185,14 @@ func (b *Broker) claimLocked() {
 		b.mu.Lock()
 		b.holder = wname
 		b.mu.Unlock()
-		return nil
+		return b.settled(nil)
 	})
+}
+
+// settled counts a load outside baton that was settled without error.
+func (b *Broker) settled(err error) error {
+	if err == nil {
+		b.count(func(c *harbor.Counters) { c.Claims++ })
+	}
+	return err
 }
