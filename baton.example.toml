@@ -26,6 +26,7 @@ restore = true              # bring the LLM back after a game or stream ends
 linger = "20s"              # a game/stream must be gone this long first (launchers restart games)
 release_wait = "60s"        # how long to wait for VRAM to read free after a release
 strict_release = true       # still holding VRAM after release_wait: start nothing on its GPUs until it lets go (Force stop / baton reclaim)
+kv_flush_wait = "20s"       # TabbyAPI with a disk KV cache (memory.disk_cache_dir): wait this long for it to finish writing before stopping it (5s at most when a game or hold needs the GPUs; "0s" = don't wait)
 residual_mib = 900          # VRAM a released engine may keep per GPU (CUDA context) and still count as freed
 busy_util_pct = 20          # an LLM using more GPU than this is generating; a switch waits for it
 switch_drain = "10m"        # longest a switch waits for the holder's current work

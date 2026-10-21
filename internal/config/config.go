@@ -61,6 +61,7 @@ type Policy struct {
 	Linger        Duration `toml:"linger"`         // a game or stream must be gone this long before it counts as over
 	ReleaseWait   Duration `toml:"release_wait"`   // how long to wait for VRAM to read free after a release
 	StrictRelease bool     `toml:"strict_release"` // an engine still holding VRAM after release_wait blocks its GPUs (aground) instead of being ignored
+	KVFlushWait   Duration `toml:"kv_flush_wait"`  // before stopping an engine that writes its KV cache to disk, wait this long for it to finish (0 = don't)
 	ResidualMiB   int      `toml:"residual_mib"`   // VRAM a released engine may keep per GPU (its CUDA context)
 	BusyUtilPct   float64  `toml:"busy_util_pct"`  // an engine's processes above this GPU load count as busy
 	SwitchDrain   Duration `toml:"switch_drain"`   // how long a switch waits for the holder's work to finish
@@ -153,6 +154,7 @@ func Default() *Config {
 			Linger:        D(20 * time.Second),
 			ReleaseWait:   D(60 * time.Second),
 			StrictRelease: true,
+			KVFlushWait:   D(20 * time.Second),
 			ResidualMiB:   900,
 			BusyUtilPct:   20,
 			SwitchDrain:   D(10 * time.Minute),

@@ -152,6 +152,18 @@ function engState(e) {
   return ['Stopped', 'st-off'];
 }
 
+// One line on an engine card about TabbyAPI's disk KV cache, and its warning.
+function diskLine(dk) {
+  const bits = [];
+  if (dk.active) bits.push(`${tok(dk.reusable_tokens)} reusable at load` + (dk.restored_tokens ? ` · ${tok(dk.restored_tokens)} restored` : ''));
+  else if (dk.active === false) bits.push('not used by this load, takes effect on the next start');
+  if (dk.used_mib !== undefined) bits.push(`${gib(dk.used_mib)}${dk.budget_mib ? ' / ' + gib(dk.budget_mib) : ''} GiB`);
+  const f = dk.last_flush;
+  if (f) bits.push(f.timed_out ? `last save cut off after ${f.secs}s` : f.files ? `last save ${Math.round(f.wrote_mib)} MB in ${f.secs}s` : 'nothing left to save at the last stop');
+  return (bits.length ? `<div class="sub" title="${esc(dk.dir || '')}">disk KV cache · ${bits.join(' · ')}</div>` : '')
+    + (dk.note ? `<div class="sub warn">${esc(dk.note)}</div>` : '');
+}
+
 function renderEngines(v) {
   const busyOp = !!v.op;
   const html = (v.engines || []).map(e => {
@@ -173,6 +185,7 @@ function renderEngines(v) {
       <div class="model" title="${esc(e.model)}">${esc(e.model || '—')}</div>
       ${rates}
       <div class="sub">${vram}${e.detail ? ' · ' + esc(e.detail) : ''}</div>
+      ${e.extra && e.extra.disk ? diskLine(e.extra.disk) : ''}
       ${bits.length ? `<div class="sub">${bits.join(' · ')}</div>` : ''}
       ${e.aground ? `<div class="errtxt">${aground(e.name, e.aground).replace(/<\/?b>/g, '')}</div>` : ''}
       ${e.error ? `<div class="errtxt">${esc(e.error)}</div>` : ''}

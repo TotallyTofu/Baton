@@ -26,7 +26,19 @@ type fake struct {
 	busy  bool
 	vram  int
 	stuck bool // a release short of "stop" leaves its VRAM in place
+	disk  bool // keeps a disk KV cache: FlushKV waits
 	log   *actionLog
+}
+
+func (f *fake) FlushKV(_ context.Context, mode string, _ engine.Status, max time.Duration, _ func(string)) (engine.FlushResult, bool) {
+	f.mu.Lock()
+	disk := f.disk && f.load
+	f.mu.Unlock()
+	if !disk || mode != "stop" {
+		return engine.FlushResult{}, false
+	}
+	f.log.add("flush " + f.cfg.Name + " " + max.String())
+	return engine.FlushResult{Secs: 0.1, Files: 3, WroteMiB: 12}, true
 }
 
 type actionLog struct {
@@ -170,6 +182,51 @@ func TestSwitchReleasesHolderFirst(t *testing.T) {
 	}
 	if r.b.View(0).Holder != "unsloth" {
 		t.Fatal("unsloth should hold the GPUs")
+	}
+}
+
+// An engine with a disk KV cache gets kv_flush_wait to finish writing it
+// before it is stopped; a game or hold allows only urgentFlushCap, and a
+// force stop none.
+func TestFlushKVBeforeStop(t *testing.T) {
+	r := newRig(t)
+	r.tabby.set(func(f *fake) { f.up, f.load, f.vram, f.disk = true, true, 12000, true })
+	r.b.tick(r.ctx, false)
+	if err := r.b.Activate(r.ctx, "unsloth", "", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := r.log.String(), "flush tabby 20s, release tabby stop, acquire unsloth"; got != want {
+		t.Fatalf("switch: actions = %q, want %q", got, want)
+	}
+
+	r = newRig(t)
+	r.tabby.set(func(f *fake) { f.up, f.load, f.vram, f.disk = true, true, 12000, true })
+	r.b.tick(r.ctx, false)
+	r.b.SetHold("game", 0)
+	r.settle(t)
+	if got, want := r.log.String(), "flush tabby 5s, release tabby stop"; got != want {
+		t.Fatalf("hold: actions = %q, want %q", got, want)
+	}
+
+	r = newRig(t)
+	r.tabby.set(func(f *fake) { f.up, f.load, f.vram, f.disk = true, true, 12000, true })
+	r.b.tick(r.ctx, false)
+	if err := r.b.Reclaim(r.ctx, "tabby"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := r.log.String(), "release tabby stop"; got != want {
+		t.Fatalf("force stop: actions = %q, want %q", got, want)
+	}
+
+	r = newRig(t)
+	r.b.cfg.Policy.KVFlushWait = config.D(0)
+	r.tabby.set(func(f *fake) { f.up, f.load, f.vram, f.disk = true, true, 12000, true })
+	r.b.tick(r.ctx, false)
+	if err := r.b.ReleaseEngine(r.ctx, "tabby"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := r.log.String(), "release tabby stop"; got != want {
+		t.Fatalf("kv_flush_wait 0: actions = %q, want %q", got, want)
 	}
 }
 

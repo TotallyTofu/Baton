@@ -198,6 +198,38 @@ type tabbyReqs struct {
 	model        string          // the model of the last load
 	clock        time.Time       // the log's time, dated from the marker
 	fin          []tabbyFinished // finished requests not collected yet
+
+	disk     tabbyDisk // the disk cache, as the log reports it
+	again    bool      // pending is being applied again, extended by wrapped lines
+	diskPrev diskDelta // what pending added to disk when it was applied before
+}
+
+// tabbyDisk is what TabbyAPI's log tells about its disk KV cache since the
+// last start: what it found at load, and what it saved and restored since.
+type tabbyDisk struct {
+	Seen        bool    // the load reported a disk cache
+	Dir         string  // the model's directory in it
+	Reusable    int     // tokens on disk a prompt can resume from, at load
+	Pages       int     // on disk, as last reported
+	Checkpoints int     //
+	UsedGB      float64 //
+	diskDelta
+	Note string // a warning: the cache is off, or writes stopped
+}
+
+// diskDelta is what one activity line of the disk cache reports.
+type diskDelta struct {
+	SavedTokens, SavedCheckpoints       int
+	SavedMB                             float64
+	RestoredTokens, RestoredCheckpoints int
+}
+
+func (d *diskDelta) add(o diskDelta, sign int) {
+	d.SavedTokens += sign * o.SavedTokens
+	d.SavedCheckpoints += sign * o.SavedCheckpoints
+	d.SavedMB += float64(sign) * o.SavedMB
+	d.RestoredTokens += sign * o.RestoredTokens
+	d.RestoredCheckpoints += sign * o.RestoredCheckpoints
 }
 
 // tabbyFinished is a request TabbyAPI summed up when it finished.
@@ -223,11 +255,18 @@ var (
 	// What a model load reports: its file and its context and cache sizes.
 	rqLoad    = regexp.MustCompile(`^Loading model (.+?)(?: \([^)]*\))?\s*$`)
 	rqContext = regexp.MustCompile(`^Context: max_seq_len ([\d,]+) tokens.*?cache_size ([\d,]+) tokens`)
+	// The disk cache (ExLlamaV3 1.6.2+): what the load found, and the writer's
+	// activity summaries.
+	dkLoad     = regexp.MustCompile(`^Disk cache: (.+) holds ([\d,]+) pages \(([\d,]+) reusable tokens\) and ([\d,]+) recurrent checkpoints, ([\d.]+) GB of ([\d.]+) GB`)
+	dkSaved    = regexp.MustCompile(`saved ([\d,]+) pages \(([\d,]+) tokens\) and ([\d,]+) checkpoints, ([\d.]+) MB of pages`)
+	dkRestored = regexp.MustCompile(`restored ([\d,]+) pages \(([\d,]+) tokens\) and ([\d,]+) checkpoints`)
+	dkOnDisk   = regexp.MustCompile(`On disk: ([\d,]+) pages, ([\d,]+) checkpoints, ([\d.]+) of ([\d.]+) GB`)
 )
 
 func (r *tabbyReqs) reset() {
 	r.marker, r.running, r.done = time.Time{}, map[string]time.Time{}, map[string]bool{}
 	r.prompts, r.window, r.pool, r.model, r.clock = map[string]int{}, 0, 0, "", time.Time{}
+	r.disk, r.diskPrev = tabbyDisk{}, diskDelta{}
 }
 
 // take hands over the finished requests read since the last call.
@@ -250,11 +289,11 @@ func (r *tabbyReqs) feed(text string, now time.Time) {
 		// Records the console wrapped at 80 columns go on in indented lines.
 		if strings.HasPrefix(l, "          ") && r.pending != "" {
 			r.pending += " " + strings.TrimSpace(l)
-			r.applied = false
+			r.applied, r.again = false, true
 			continue
 		}
 		r.flush(now)
-		r.pending, r.applied = l, false
+		r.pending, r.applied, r.again, r.diskPrev = l, false, false, diskDelta{}
 	}
 	// The last record counts now; if wrapped lines follow it is applied
 	// again, which changes nothing for a start or an end already seen.
@@ -309,6 +348,20 @@ func (r *tabbyReqs) apply(rec string, now time.Time) {
 			r.model = p[strings.LastIndexAny(p, `\/`)+1:]
 			return
 		}
+		if s := dkLoad.FindStringSubmatch(msg); s != nil {
+			d := &r.disk
+			d.Seen, d.Dir, d.Reusable = true, strings.TrimSpace(s[1]), atoi(s[3])
+			d.Pages, d.Checkpoints, d.UsedGB = atoi(s[2]), atoi(s[4]), atof(s[5])
+			return
+		}
+		if strings.HasPrefix(msg, "Disk cache tier: ") {
+			r.diskActivity(msg)
+			return
+		}
+	}
+	if level != "INFO" && (strings.HasPrefix(msg, "Disk cache tier: ") || strings.HasPrefix(msg, "disk_cache_dir ")) {
+		r.disk.Note = msg
+		return
 	}
 	switch {
 	case strings.HasPrefix(msg, "Immediately terminating all jobs"), strings.HasPrefix(msg, "Model unloaded"):
@@ -327,6 +380,27 @@ func (r *tabbyReqs) apply(rec string, now time.Time) {
 				}
 			}
 		}
+	}
+}
+
+// diskActivity takes one of the disk cache writer's summaries: what it saved
+// and restored since the one before, and what is on disk now. A summary
+// applied again (wrapped lines extended it) first takes back what it added.
+func (r *tabbyReqs) diskActivity(msg string) {
+	var d diskDelta
+	if s := dkSaved.FindStringSubmatch(msg); s != nil {
+		d.SavedTokens, d.SavedCheckpoints, d.SavedMB = atoi(s[2]), atoi(s[3]), atof(s[4])
+	}
+	if s := dkRestored.FindStringSubmatch(msg); s != nil {
+		d.RestoredTokens, d.RestoredCheckpoints = atoi(s[2]), atoi(s[3])
+	}
+	if r.again {
+		r.disk.add(r.diskPrev, -1)
+	}
+	r.disk.add(d, 1)
+	r.diskPrev = d
+	if s := dkOnDisk.FindStringSubmatch(msg); s != nil {
+		r.disk.Pages, r.disk.Checkpoints, r.disk.UsedGB = atoi(s[1]), atoi(s[2]), atof(s[3])
 	}
 }
 

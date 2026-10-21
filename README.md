@@ -149,6 +149,28 @@ generating, read from this log, including ones sent to its port directly. If
 you started it yourself (or with `show_window`) there is no log to read, and
 baton goes by its GPU load instead.
 
+Baton reads `api_tokens.yml` and `config.yml` again whenever they change, so a
+key TabbyAPI regenerates works through the gateway right away.
+
+**TabbyAPI's disk KV cache.** With ExLlamaV3 1.6.2 or later, TabbyAPI can keep
+its KV cache on disk, so a conversation picks up where it left off after a
+switch instead of reading its whole prompt again. In TabbyAPI's `config.yml`,
+under `memory:`, set `sysmem_kv_cache` above 0 (the disk tier writes through
+it) and `disk_cache_dir` to a folder on a fast drive; `disk_cache_size` caps
+it (MB, for every model together) and `disk_cache_flush_on_idle: true` writes
+the cache out whenever a request ends. Then:
+
+- Before stopping TabbyAPI, baton waits until the cache stops changing on disk
+  (up to `kv_flush_wait`, 20 s; 5 s at most when a game or hold needs the
+  GPUs; Force stop doesn't wait). TabbyAPI writes each file under a temporary
+  name and renames it when done, so anything cut off is lost, not corrupted.
+- The tabby card and the KV pool panel show how full the cache is, how many
+  tokens TabbyAPI found there when it loaded, and what it saved and restored
+  since.
+
+The disk cache is marked experimental in TabbyAPI. It holds your conversations'
+content unencrypted, so put it somewhere only you can read.
+
 **Unsloth Studio.** Studio stays open; baton unloads and reloads its model over
 Studio's API, which needs a key: create one in Studio (Settings → API keys),
 then `setx UNSLOTH_API_KEY "<key>"`. Without a key baton can still free the

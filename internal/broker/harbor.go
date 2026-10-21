@@ -266,6 +266,7 @@ type Pool struct {
 	Context any    `json:"context,omitempty"` // Unsloth's context length, as it reports it
 	KV      any    `json:"kv,omitempty"`
 	Slots   any    `json:"slots,omitempty"`
+	Disk    any    `json:"disk,omitempty"` // TabbyAPI's disk KV cache
 }
 
 // RequestsView is the engines and requests page.
@@ -332,7 +333,7 @@ func (b *Broker) Requests(rng time.Duration) RequestsView {
 		s := b.st[name]
 		p := Pool{Engine: name, Kind: s.Kind, Model: s.Model, Up: s.Up, Loaded: s.Loaded}
 		if s.Extra != nil {
-			p.KV, p.Slots, p.Context = s.Extra["kv"], s.Extra["slots"], s.Extra["context"]
+			p.KV, p.Slots, p.Context, p.Disk = s.Extra["kv"], s.Extra["slots"], s.Extra["context"], s.Extra["disk"]
 		}
 		if kv, ok := p.KV.(map[string]any); ok {
 			p.Window, _ = kv["window"].(int)

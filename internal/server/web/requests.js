@@ -26,13 +26,43 @@ function renderRequests(r) {
 }
 
 // --- KV pool ---
+
+// TabbyAPI's disk KV cache, under its pool: how full the directory is, what
+// the running TabbyAPI found there at load and has restored and saved since
+// (from its log), and how the last save before a stop went.
+function diskBlock(dk) {
+  if (!dk) return '';
+  const has = dk.used_mib !== undefined;
+  const pct = has && dk.budget_mib ? Math.min(100, dk.used_mib / dk.budget_mib * 100) : 0;
+  const f = dk.last_flush;
+  const last = f ? (f.timed_out ? `cut at ${f.secs}s` : f.files ? `${Math.round(f.wrote_mib).toLocaleString()} MB` : 'none due') : '—';
+  const lastTip = f ? `${f.timed_out ? `gave up after ${f.secs}s with ${f.writing} write(s) open` : `${f.files} file(s), ${f.wrote_mib} MB written; waited ${f.secs}s`} · ${new Date(f.at).toLocaleString()}` : 'no stop has waited for it yet';
+  const figs = dk.active
+    ? [[tok(dk.reusable_tokens), 'reusable at load', 'prompt tokens TabbyAPI found on disk when it loaded'],
+       [tok(dk.restored_tokens || 0), 'restored', `read back from disk since it started (${dk.restored_checkpoints || 0} checkpoints)`],
+       [tok(dk.saved_tokens || 0), 'saved', `${dk.saved_mib || 0} MB written since it started`],
+       [last, 'last save', lastTip]]
+    : [[has ? gib(dk.used_mib) + ' GiB' : '—', 'on disk', dk.dir || ''],
+       [dk.budget_mib ? gib(dk.budget_mib) + ' GiB' : '—', 'budget', 'disk_cache_size'],
+       [last, 'last save', lastTip]];
+  const note = dk.active ? 'from TabbyAPI\'s log since it started; restored tokens skip prefill'
+    : dk.active === false ? 'set in config.yml, but this TabbyAPI loaded without it: it takes effect on the next start'
+    : 'kept on disk for the next start';
+  return `<div class="disk-tier">
+    <div class="pool-h"><span class="lbl">DISK TIER</span><span class="r" title="${esc(dk.dir || '')}">${has ? `${gib(dk.used_mib)}${dk.budget_mib ? ' / ' + gib(dk.budget_mib) : ''} GiB` : esc(dk.dir || '')}</span></div>
+    ${dk.budget_mib && has ? `<div class="kvbar thin" role="img" aria-label="${gib(dk.used_mib)} of ${gib(dk.budget_mib)} GiB of the disk cache budget used"><span class="disk" style="width:${pct.toFixed(1)}%"></span></div>` : ''}
+    <div class="figs">${figs.map(([b, s, t]) => `<div title="${esc(t)}"><b>${esc(b)}</b><span>${s}</span></div>`).join('')}</div>
+    <div class="note">${note}</div>${dk.note ? `<div class="note warn">${esc(dk.note)}</div>` : ''}
+  </div>`;
+}
+
 function renderPools(v) {
   const llms = (v.engines || []).filter(e => e.llm);
   let slots = 0, reporting = 0;
   const html = llms.map(e => {
-    const x = e.extra || {}, kv = x.kv, sl = x.slots;
+    const x = e.extra || {}, kv = x.kv, sl = x.slots, dk = diskBlock(x.disk);
     const head = `<div class="pool-h"><span class="sw" style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${colorOf(e.name)}"></span><b>${esc(e.name)}</b><span>${esc(e.model || (e.up ? 'no model' : 'not running'))}</span>`;
-    if (!e.loaded) return `<div class="pool">${head}</div><div class="note">${e.up ? 'No model loaded: no cache to show.' : 'Not running.'}</div></div>`;
+    if (!e.loaded) return `<div class="pool">${head}</div><div class="note">${e.up ? 'No model loaded: no cache to show.' : 'Not running.'}</div>${dk}</div>`;
     if (sl && sl.length) {
       reporting++; slots += sl.length;
       const cells = sl.map(s => {
@@ -51,10 +81,10 @@ function renderPools(v) {
         <div class="kvbar" role="img" aria-label="${used.toLocaleString()} of ${pool.toLocaleString()} cache tokens in prompts of requests in flight">${segs}${ticks}</div>
         <div class="figs"><div><b>${tok(pool)}</b><span>cache pool</span></div><div><b>${kv.window ? tok(kv.window) : '—'}</b><span>window</span></div><div><b>${fl.length ? tok(used) : '0'}</b><span>prompts in flight</span></div><div><b>${esc(kv.cache_mode || '—')}</b><span>cache mode</span></div></div>
         ${fl.length ? `<div class="flights">${fl.map(f => `<div><span>#${esc(f.tag)}</span><span>${f.prompt.toLocaleString()} tokens · ${span(f.age_s)}</span></div>`).join('')}</div>` : ''}
-        <div class="note">${kv.inflight ? 'from TabbyAPI\'s log: prompt tokens of each request in flight; the tokens they generate and the prefix cache are not reported' : 'from TabbyAPI: window and pool of the loaded model; requests in flight are read from its log when baton started it'}</div></div>`;
+        <div class="note">${kv.inflight ? 'from TabbyAPI\'s log: prompt tokens of each request in flight; the tokens they generate and the prefix cache are not reported' : 'from TabbyAPI: window and pool of the loaded model; requests in flight are read from its log when baton started it'}</div>${dk}</div>`;
     }
     const ctx = typeof x.context === 'number' ? x.context : 0;
-    return `<div class="pool">${head}${ctx ? `<span class="r">${tok(ctx)} window</span>` : ''}</div><div class="note">No live slot data: ${esc(e.name)} reports ${ctx ? 'only its context length' : 'nothing about its cache'}.</div></div>`;
+    return `<div class="pool">${head}${ctx ? `<span class="r">${tok(ctx)} window</span>` : ''}</div><div class="note">No live slot data: ${esc(e.name)} reports ${ctx ? 'only its context length' : 'nothing about its cache'}.</div>${dk}</div>`;
   }).join('') || '<div class="empty-note">No LLM engines configured.</div>';
   if ($('#pools').innerHTML !== html) $('#pools').innerHTML = html;
   $('#poolMeta').textContent = reporting ? `${reporting} engine${reporting === 1 ? ' reports its' : 's report their'} cache${slots ? ` · ${slots} live slots` : ''}` : 'no engine reports its cache right now';

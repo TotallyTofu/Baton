@@ -127,6 +127,22 @@ func manual(ctx context.Context) context.Context { return context.WithValue(ctx,
 
 func isManual(ctx context.Context) bool { v, _ := ctx.Value(manualKey{}).(bool); return v }
 
+// forceKey marks a force stop: it doesn't wait for an engine to save its KV
+// cache to disk.
+type forceKey struct{}
+
+func forced(ctx context.Context) context.Context { return context.WithValue(ctx, forceKey{}, true) }
+
+func isForced(ctx context.Context) bool { v, _ := ctx.Value(forceKey{}).(bool); return v }
+
+// urgentFlushCap bounds the wait for a disk KV cache when a game or a hold
+// needs the cards now. TabbyAPI writes the pages of a running request every
+// 2 s while it generates and starts its idle flush when the request ends, so
+// by the time the drain is over little is left: a few seconds cover the tail
+// of a long context on an NVMe drive. A game gets its memory without a
+// noticeable delay; what isn't written by then is lost, not corrupted.
+const urgentFlushCap = 5 * time.Second
+
 type hookSig struct {
 	kind  string
 	since time.Time
@@ -856,6 +872,7 @@ func (b *Broker) releaseOne(ctx context.Context, e engine.Engine, mode string, g
 	for _, g := range gpus {
 		held += s.VRAMMiB[g]
 	}
+	b.flushKV(ctx, e, mode, s)
 	b.stage("releasing %s (%s)", name, mode)
 	b.ev.Infof("release", name, "releasing %s (%s)", name, mode)
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -887,6 +904,40 @@ func (b *Broker) releaseOne(ctx context.Context, e engine.Engine, mode string, g
 		})
 	}
 	return werr
+}
+
+// flushKV gives an engine that keeps its KV cache on disk time to finish
+// writing it before a release that would cut it off: kv_flush_wait, or
+// urgentFlushCap when a game or a hold is waiting. A force stop doesn't wait.
+func (b *Broker) flushKV(ctx context.Context, e engine.Engine, mode string, s engine.Status) {
+	f, ok := e.(engine.KVFlusher)
+	if !ok || isForced(ctx) {
+		return
+	}
+	max := b.cfg.Policy.KVFlushWait.Duration
+	b.mu.Lock()
+	urgent := (b.cur != nil && b.cur.urgent) || held(b.mode)
+	b.mu.Unlock()
+	if urgent && max > urgentFlushCap {
+		max = urgentFlushCap
+	}
+	if max <= 0 {
+		return
+	}
+	name := e.Config().Name
+	deadline := time.Now().Add(max)
+	res, ok := f.FlushKV(ctx, mode, s, max, func(msg string) {
+		b.stage("letting %s save its KV cache to disk: %s (gives up in %s)", name, msg, time.Until(deadline).Round(time.Second))
+	})
+	switch {
+	case !ok || ctx.Err() != nil:
+	case res.TimedOut:
+		b.ev.Warnf("kvcache", name, "%s was still writing its KV cache to disk after %s (%d write(s) open, %.0f MB written); stopping it anyway: what isn't written yet is lost, the rest stays usable", name, max, res.Writing, res.WroteMiB)
+	case res.Files > 0:
+		b.ev.Infof("kvcache", name, "%s saved its KV cache to disk: %.0f MB in %d file(s), waited %.1fs", name, res.WroteMiB, res.Files, res.Secs)
+	default:
+		b.ev.Infof("kvcache", name, "%s had nothing left to write to its disk KV cache (waited %.1fs)", name, res.Secs)
+	}
 }
 
 // freeFor releases every engine on gpus. remember records the LLM that held
@@ -1237,7 +1288,7 @@ func (b *Broker) Reclaim(ctx context.Context, name string) error {
 		return fmt.Errorf("no engine %q", name)
 	}
 	o := b.submit("reclaim:"+name, "force stop "+name, false, func(ctx context.Context) error {
-		return b.releaseOne(manual(ctx), e, "stop", e.Config().GPUs)
+		return b.releaseOne(forced(manual(ctx)), e, "stop", e.Config().GPUs)
 	})
 	return wait(ctx, o)
 }

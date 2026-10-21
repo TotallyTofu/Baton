@@ -26,8 +26,14 @@ import (
 // use_as_default lists the keys).
 type tabby struct {
 	base
+
+	// What TabbyAPI's files say, read again whenever they change.
+	fmu              sync.Mutex
 	apiKey, adminKey string
 	modelName        string
+	disk             kvDisk
+	tokStamp         fileStamp
+	cfgStamp         fileStamp
 
 	mmu     sync.Mutex
 	logMod  time.Time
@@ -41,6 +47,33 @@ type tabby struct {
 	reqMod    time.Time
 	reqSize   int64
 	idleSince time.Time // since when requests have been "in flight" on an idle GPU
+
+	// The disk KV cache: the model's directory in it, when the trusted log of
+	// the TabbyAPI running now names it (off: the log shows a load without
+	// one), and the last wait before a stop.
+	runDiskDir string
+	runDiskOff bool
+	lastFlush  *FlushResult
+	usage      struct {
+		dir   string
+		at    time.Time
+		bytes int64
+		ok    bool
+	}
+}
+
+// fileStamp tells whether a file changed since it was read.
+type fileStamp struct {
+	mod  time.Time
+	size int64
+}
+
+func stampOf(p string) fileStamp {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return fileStamp{}
+	}
+	return fileStamp{fi.ModTime(), fi.Size()}
 }
 
 const (
@@ -58,27 +91,73 @@ func newTabby(c config.Engine, env *Env) *tabby {
 
 func (t *tabby) IsLLM() bool { return true }
 
-// reloadFiles reads the tokens and the configured model name. Both are read
-// again on every start so edits to TabbyAPI's files take effect.
-func (t *tabby) reloadFiles() {
-	tok := t.cfg.TokensFile
-	if tok == "" && t.cfg.Dir != "" {
-		tok = filepath.Join(t.cfg.Dir, "api_tokens.yml")
+func (t *tabby) tokensPath() string {
+	if t.cfg.TokensFile == "" && t.cfg.Dir != "" {
+		return filepath.Join(t.cfg.Dir, "api_tokens.yml")
 	}
+	return t.cfg.TokensFile
+}
+
+func (t *tabby) configPath() string {
+	if t.cfg.Dir == "" {
+		return ""
+	}
+	return filepath.Join(t.cfg.Dir, "config.yml")
+}
+
+// reloadFiles reads the tokens, the configured model name and the disk
+// cache setting. A start reads them again, and so does refreshFiles once
+// either file changes, so a key TabbyAPI regenerates works at once, also for
+// a TabbyAPI started outside baton.
+func (t *tabby) reloadFiles() {
+	t.fmu.Lock()
+	defer t.fmu.Unlock()
+	tok, cfg := t.tokensPath(), t.configPath()
+	// Stamped before reading: a change made meanwhile is read next time.
+	t.tokStamp, t.cfgStamp = stampOf(tok), stampOf(cfg)
 	if kv := readYAMLTop(tok); kv != nil {
+		if old := t.apiKey; old != "" && kv["api_key"] != old && t.env != nil && t.env.Events != nil {
+			t.env.Events.Infof("config", t.cfg.Name, "%s's API key changed (%s); using the new one", t.cfg.Name, filepath.Base(tok))
+		}
 		t.apiKey, t.adminKey = kv["api_key"], kv["admin_key"]
 	}
-	if t.cfg.Dir != "" {
-		t.modelName = readYAMLKey(filepath.Join(t.cfg.Dir, "config.yml"), "model", "model_name")
+	if cfg != "" {
+		t.modelName = readYAMLKey(cfg, "model", "model_name")
+		t.disk = readKVDisk(t.cfg.Dir)
 	}
 }
 
+// refreshFiles reads TabbyAPI's files again if they changed on disk.
+func (t *tabby) refreshFiles() {
+	tok, cfg := stampOf(t.tokensPath()), stampOf(t.configPath())
+	t.fmu.Lock()
+	same := tok == t.tokStamp && cfg == t.cfgStamp
+	t.fmu.Unlock()
+	if !same {
+		t.reloadFiles()
+	}
+}
+
+func (t *tabby) model() string {
+	t.fmu.Lock()
+	defer t.fmu.Unlock()
+	return t.modelName
+}
+
+func (t *tabby) diskConf() kvDisk {
+	t.fmu.Lock()
+	defer t.fmu.Unlock()
+	return t.disk
+}
+
 func (t *tabby) hdr(admin bool) http.Header {
-	h := http.Header{}
+	t.fmu.Lock()
 	k := t.apiKey
 	if admin && t.adminKey != "" {
 		k = t.adminKey
 	}
+	t.fmu.Unlock()
+	h := http.Header{}
 	if k != "" {
 		h.Set("Authorization", "Bearer "+k)
 	}
@@ -86,18 +165,20 @@ func (t *tabby) hdr(admin bool) http.Header {
 }
 
 func (t *tabby) Upstream() (string, http.Header) {
+	t.refreshFiles()
 	return strings.TrimRight(t.cfg.URL, "/"), t.hdr(false)
 }
 
 func (t *tabby) Serves(model string) (bool, string) {
 	var extra []string
-	if t.modelName != "" {
-		extra = append(extra, t.modelName)
+	if m := t.model(); m != "" {
+		extra = append(extra, m)
 	}
 	return t.servesList(model, extra)
 }
 
 func (t *tabby) Probe(ctx context.Context, snap *telemetry.Snapshot) Status {
+	t.refreshFiles()
 	st := t.probeServer(ctx, snap)
 	if m := t.lastMetrics(); m != nil {
 		if st.Extra == nil {
@@ -116,7 +197,9 @@ func (t *tabby) Probe(ctx context.Context, snap *telemetry.Snapshot) Status {
 func (t *tabby) trackRequests(st *Status, now time.Time) {
 	t.rmu.Lock()
 	defer t.rmu.Unlock()
-	if !t.readRequests(LogPath(t.env.StateDir, t.cfg.Name), now) || !st.Up || !t.logTrusted(*st) {
+	trusted := t.readRequests(LogPath(t.env.StateDir, t.cfg.Name), now) && st.Up && t.logTrusted(*st)
+	t.diskLocked(st, trusted, now)
+	if !trusted {
 		t.idleSince = time.Time{}
 		return
 	}
@@ -206,7 +289,7 @@ func (t *tabby) record(fin []tabbyFinished) {
 		m := f.M
 		model := f.Model
 		if model == "" {
-			model = t.modelName
+			model = t.model()
 		}
 		_, route, _ := strings.Cut(m.Request, " ")
 		t.env.Record(harbor.Request{
@@ -248,6 +331,98 @@ func (t *tabby) kvLocked(st *Status, now time.Time) {
 		st.Extra = map[string]any{}
 	}
 	st.Extra["kv"] = kv
+}
+
+// diskLocked adds the disk KV cache to the status: where it is and how full,
+// what the TabbyAPI running now found there at load and has saved and
+// restored since (from its log, when trusted), and how the last wait for it
+// before a stop went. Nothing is added when no disk cache is set up.
+func (t *tabby) diskLocked(st *Status, trusted bool, now time.Time) {
+	conf := t.diskConf()
+	ld := t.reqs.disk
+	known := trusted && st.Loaded // the log tells whether this load has one
+	t.runDiskDir, t.runDiskOff = "", known && !ld.Seen
+	if known && ld.Seen {
+		t.runDiskDir = ld.Dir
+	}
+	root := conf.Dir
+	if t.runDiskDir != "" {
+		root = filepath.Dir(t.runDiskDir) // the log names the model's directory in it
+	}
+	note := conf.Note
+	if trusted && ld.Note != "" {
+		note = ld.Note
+	}
+	if root == "" && note == "" && t.lastFlush == nil {
+		return
+	}
+	d := map[string]any{}
+	if root != "" {
+		d["dir"] = root
+		if conf.BudgetMiB > 0 {
+			d["budget_mib"] = conf.BudgetMiB
+		}
+		if u := &t.usage; u.dir != root || now.Sub(u.at) > kvUsageTTL {
+			u.dir, u.at = root, now
+			u.bytes, u.ok = dirUsage(root)
+		}
+		if t.usage.ok {
+			d["used_mib"] = round1(float64(t.usage.bytes) / (1 << 20))
+		}
+	}
+	if trusted && ld.Seen {
+		d["active"] = true
+		d["reusable_tokens"] = ld.Reusable
+		d["pages"], d["checkpoints"] = ld.Pages, ld.Checkpoints
+		d["saved_tokens"], d["saved_mib"] = ld.SavedTokens, round1(ld.SavedMB)
+		d["restored_tokens"], d["restored_checkpoints"] = ld.RestoredTokens, ld.RestoredCheckpoints
+	} else if known {
+		d["active"] = false // this TabbyAPI loaded without it
+	}
+	if note != "" {
+		d["note"] = note
+	}
+	if t.lastFlush != nil {
+		d["last_flush"] = *t.lastFlush
+	}
+	if st.Extra == nil {
+		st.Extra = map[string]any{}
+	}
+	st.Extra["disk"] = d
+}
+
+// FlushKV waits for TabbyAPI to finish writing its KV cache to disk before
+// it is stopped. Its idle flush begins when the last request ends, which the
+// broker's drain has waited for. An unload through the API needs no wait:
+// TabbyAPI then writes the cache out itself before it lets go.
+func (t *tabby) FlushKV(ctx context.Context, mode string, st Status, max time.Duration, progress func(string)) (FlushResult, bool) {
+	if mode == "unload" || mode == "free" || max <= 0 || !st.Loaded || len(st.procs) == 0 {
+		return FlushResult{}, false
+	}
+	t.refreshFiles()
+	t.rmu.Lock()
+	dir, off := t.runDiskDir, t.runDiskOff
+	t.rmu.Unlock()
+	if off {
+		return FlushResult{}, false
+	}
+	if dir == "" {
+		// Not in the log (started outside baton): what config.yml says. A
+		// directory nobody is writing settles at once.
+		dir = t.diskConf().Dir
+	}
+	if dir == "" {
+		return FlushResult{}, false
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return FlushResult{}, false
+	}
+	res := waitFlushed(ctx, dir, pidsOf(st.procs), kvQuiet, max, kvPoll, progress)
+	t.rmu.Lock()
+	t.lastFlush = &res
+	t.usage.at = time.Time{} // measure again
+	t.rmu.Unlock()
+	return res, true
 }
 
 // logTrusted reports whether the log shows the TabbyAPI running now: baton
@@ -308,7 +483,7 @@ func (t *tabby) lastMetrics() *TabbyMetrics {
 }
 
 func (t *tabby) probeServer(ctx context.Context, snap *telemetry.Snapshot) Status {
-	st := Status{URL: t.cfg.URL, Model: t.modelName}
+	st := Status{URL: t.cfg.URL, Model: t.model()}
 	t.fill(&st, snap, t.attribute(snap, portOf(t.cfg.URL)))
 	pctx, cancel := probeCtx(ctx)
 	defer cancel()
@@ -389,15 +564,16 @@ func (t *tabby) Acquire(ctx context.Context, model string, progress func(string)
 		return nil
 	}
 	t.reloadFiles()
+	name := t.model()
 	if st.Up && !st.Loaded {
-		if t.modelName == "" {
+		if name == "" {
 			return errors.New("tabby is up with no model and config.yml names none")
 		}
-		progress("loading " + t.modelName)
+		progress("loading " + name)
 		lctx, cancel := context.WithTimeout(ctx, t.cfg.ReadyTimeout.Duration)
 		defer cancel()
-		if err := doJSON(lctx, "POST", t.cfg.URL+"/v1/model/load", t.hdr(true), map[string]any{"model_name": t.modelName}, nil); err != nil {
-			return fmt.Errorf("load %s: %w", t.modelName, err)
+		if err := doJSON(lctx, "POST", t.cfg.URL+"/v1/model/load", t.hdr(true), map[string]any{"model_name": name}, nil); err != nil {
+			return fmt.Errorf("load %s: %w", name, err)
 		}
 	} else if !st.Loading {
 		if err := t.launch(); err != nil {
@@ -419,7 +595,7 @@ func (t *tabby) Acquire(ctx context.Context, model string, progress func(string)
 			}
 			return false, errors.New(e)
 		}
-		progress(fmt.Sprintf("loading %s, %ds", t.modelName, int(time.Since(start).Seconds())))
+		progress(fmt.Sprintf("loading %s, %ds", name, int(time.Since(start).Seconds())))
 		return false, nil
 	})
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -448,7 +624,7 @@ func readYAMLTop(path string) map[string]string {
 	out := map[string]string{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		line := sc.Text()
+		line := strings.TrimPrefix(sc.Text(), "\xef\xbb\xbf") // a BOM an editor added
 		if strings.HasPrefix(strings.TrimSpace(line), "#") || strings.HasPrefix(line, " ") {
 			continue
 		}
@@ -470,7 +646,7 @@ func readYAMLKey(path, section, key string) string {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
-		line := sc.Text()
+		line := strings.TrimPrefix(sc.Text(), "\xef\xbb\xbf")
 		trim := strings.TrimSpace(line)
 		if trim == "" || strings.HasPrefix(trim, "#") {
 			continue
