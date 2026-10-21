@@ -84,8 +84,8 @@ gateway); where nothing was measured the page says so instead of guessing.
 - **Departures**: the change under way and the queue with their ticket
   numbers, everything on the cards (docked, moored, boarding, aground), and the
   recent voyages with how long each took and how much memory it freed.
-- **Harbor log** (filter by kind or text), **berths** (each card: memory by
-  holder, load, temperature, power, the processes on it), **the machine**
+- **Harbor log** (filter by kind or text), **the machines** (each card: memory by
+  holder, load, temperature, power, the processes on it), **memory**
   (RAM, commit, cache), games and streams, and **stowaways**: processes
   holding real VRAM that belong to no engine, game or stream.
 
