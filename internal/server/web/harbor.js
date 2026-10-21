@@ -237,10 +237,13 @@ function renderMem(v) {
   const track = segs.map(([k, mib, c]) => `<span title="${esc(k)}: ${gib(mib)} GiB" style="width:${mib / total * 100}%;background:${c}"></span>`).join('')
     + (rest > 64 ? `<span class="hatch" style="width:${rest / total * 100}%;background:repeating-linear-gradient(135deg,var(--faint) 0 2px,transparent 2px 5px)" title="services, drivers and kernel: ${gib(rest)} GiB"></span>` : '');
   const load = m.load, color = load >= 95 ? 'var(--red)' : load >= 85 ? 'var(--amber)' : 'var(--cyan)';
-  const bar = (k, frac, c, val, title) => `<div class="mrow" title="${esc(title || '')}"><span class="k">${k}</span><span class="track"><span style="width:${Math.min(100, frac * 100)}%;background:${c}"></span></span><span class="v">${val}</span></div>`;
+  const bar = (k, frac, c, val, title, vc) => `<div class="mrow" title="${esc(title || '')}"><span class="k">${k}</span><span class="track"><span style="width:${Math.min(100, frac * 100)}%;background:${c}"></span></span><span class="v"${vc ? ` style="color:${vc}"` : ''}>${val}</span></div>`;
+  // Windows refuses new memory once commit reaches its limit, however much RAM is free.
+  const commit = m.commit_limit ? m.commit_total / m.commit_limit : 0, commitHigh = commit > 0.9;
   const rows = hs.slice(0, 7).map(h => `<li><span class="w" style="color:${colorOf(h.tag || 'apps')}">${esc((h.tag && h.tag !== 'system' ? (kinds[h.tag] ? 'ENGINE' : h.tag) : h.tag === 'system' ? 'SYSTEM' : 'APP').toUpperCase())}</span><span class="hn">${esc(h.tag && kinds[h.tag] ? h.tag : h.name)}${h.count > 1 ? ` <span style="color:var(--faint)">×${h.count}</span>` : ''}</span><span class="hm">${gib(h.mib)} GiB</span></li>`).join('');
   const html = `<div class="mrow"><span class="k">RAM</span><span class="track">${track}</span><span class="v" style="color:${color}">${gib(used)} / ${gib(total)} GiB</span></div>`
-    + bar('COMMIT', m.commit_total / m.commit_limit, 'var(--violet)', `${gib(m.commit_total / M)} / ${gib(m.commit_limit / M)} GiB`, 'committed memory against RAM plus page file')
+    + bar('COMMIT', commit, commitHigh ? 'var(--amber)' : 'var(--violet)', `${gib(m.commit_total / M)} / ${gib(m.commit_limit / M)} GiB`,
+      `Commit ${Math.round(commit * 100)}% of limit (RAM + page file).` + (commitHigh ? " Windows refuses new memory when it's full." : ''), commitHigh ? 'var(--amber)' : '')
     + bar('CACHED', m.cached / m.total, 'var(--c-system)', `${gib(m.cached / M)} GiB`, 'file cache Windows hands back when asked')
     + bar('KERNEL', m.kernel / m.total, 'var(--c-system)', `${gib(m.kernel / M)} GiB`)
     + `<ul class="holders">${rows}</ul>`;
